@@ -1,0 +1,19 @@
+# shopify.app.toml (radice del repo)
+
+client_id = "debf936e7b058faf8fbad1c58b61dc94"   # API Key della tua Custom App
+name = "Xmas Events App"
+handle = "xmas-events-app"
+application_url = "https://xmas-events-app.vercel.app"
+embedded = true
+
+[access_scopes]
+scopes = "read_products,read_metafields,write_metafields"
+
+[auth]
+redirect_urls = ["https://xmas-events-app.vercel.app/api/auth/callback"]
+
+[build]
+automatically_update_urls_on_dev = true
+dev_store_url = "sinflorashop.myshopify.com"
+[webhooks]
+api_version = "2024-07"
