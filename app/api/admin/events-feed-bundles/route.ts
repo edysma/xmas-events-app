@@ -122,23 +122,24 @@ export async function GET(req: NextRequest) {
     const products: Array<{ id: string; title: string; variants: Array<{ id: string; title: string }> }> = [];
 
     while (true) {
-      const data = await adminFetchGQL<{
-        products: {
-          edges: { cursor: string; node: any }[];
-          pageInfo: { hasNextPage: boolean };
-        };
-      }>(Q_PRODUCTS_BY_QUERY, { q, after });
-      for (const e of data.products.edges) {
-        const node = e.node;
-        products.push({
-          id: node.id,
-          title: node.title,
-          variants: (node.variants?.edges || []).map((x: any) => ({ id: x.node.id, title: x.node.title })),
-        });
-      }
-      if (!data.products.pageInfo.hasNextPage) break;
-      after = data.products.edges[data.products.edges.length - 1].cursor;
-    }
+  const resp: {
+    products: {
+      edges: { cursor: string; node: { id: string; title: string; variants?: { edges: { node: { id: string; title: string } }[] } } }[];
+      pageInfo: { hasNextPage: boolean };
+    };
+  } = await adminFetchGQL(Q_PRODUCTS_BY_QUERY, { q, after });
+
+  for (const e of resp.products.edges) {
+    const node = e.node;
+    products.push({
+      id: node.id,
+      title: node.title,
+      variants: (node.variants?.edges || []).map((x) => ({ id: x.node.id, title: x.node.title })),
+    });
+  }
+  if (!resp.products.pageInfo.hasNextPage) break;
+  after = resp.products.edges[resp.products.edges.length - 1].cursor;
+}
 
     // 3) Costruisci giorni/slot dal titolo prodotto
     type Slot = {
