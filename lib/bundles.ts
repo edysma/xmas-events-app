@@ -89,10 +89,25 @@ const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ `
   }
 `;
 
+const Q_PRODUCT_BY_ID = /* GraphQL */ `
+  query ProductById($id: ID!) {
+    product(id: $id) {
+      id
+      title
+      status
+      templateSuffix
+      tags
+      variants(first: 20) {
+        edges { node { id title selectedOptions { name value } inventoryItem { id } } }
+      }
+    }
+  }
+`;
+
 const M_PRODUCT_CREATE = /* GraphQL */ `
   mutation CreateProduct($input: ProductInput!) {
     productCreate(input: $input) {
-      product { id title status templateSuffix variants(first: 5) { edges { node { id title } } } }
+      product { id title status templateSuffix }
       userErrors { field message }
     }
   }
@@ -156,10 +171,13 @@ async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
   if (mustHaveTag) parts.push(`tag:${mustHaveTag}`);
   const q = parts.join(" ");
-  const data = await adminFetchGQL<{
-    products: { edges: { node: any }[] };
-  }>(Q_FIND_PRODUCT_BY_TITLE, { q });
+  const data = await adminFetchGQL<{ products: { edges: { node: any }[] } }>(Q_FIND_PRODUCT_BY_TITLE, { q });
   return data.products.edges[0]?.node ?? null;
+}
+
+async function getProductById(productId: string) {
+  const data = await adminFetchGQL<{ product: any }>(Q_PRODUCT_BY_ID, { id: productId });
+  return data.product ?? null;
 }
 
 async function createProductDraft(params: {
@@ -176,17 +194,12 @@ async function createProductDraft(params: {
   if (params.tags?.length) input.tags = params.tags.join(", ");
   if (params.descriptionHtml) input.descriptionHtml = params.descriptionHtml;
 
-  const res = await adminFetchGQL<{
-    productCreate: {
-      product?: any;
-      userErrors: { field?: string[]; message: string }[];
-    };
-  }>(M_PRODUCT_CREATE, { input });
+  const res = await adminFetchGQL<{ productCreate: { product?: any; userErrors: { field?: string[]; message: string }[] } }>(M_PRODUCT_CREATE, { input });
 
   const errs = res.productCreate.userErrors;
   if (errs?.length) throw new Error(`productCreate error: ${errs.map(e => e.message).join(" | ")}`);
   const product = res.productCreate.product;
-  if (!product?.id) throw new Error("productCreate: prodotto non creato");
+  if (!product?.id) throw new Error("productCreate: prodotto non creato (ID mancante)");
   return product;
 }
 
@@ -199,6 +212,20 @@ function labelForVariant(k: "unico" | "adulto" | "bambino" | "handicap") {
   if (k === "adulto") return "Adulto";
   if (k === "bambino") return "Bambino";
   return "Handicap";
+}
+
+function mapVariantIdsFromNodes(nodes: any[]): Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> {
+  const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
+    unico: undefined, adulto: undefined, bambino: undefined, handicap: undefined,
+  };
+  for (const v of nodes) {
+    const t = (v.selectedOptions?.[0]?.value || v.title || "").toLowerCase();
+    if (t.includes("unico")) ret.unico = v.id;
+    else if (t.includes("adulto")) ret.adulto = v.id;
+    else if (t.includes("bambino")) ret.bambino = v.id;
+    else if (t.includes("handicap")) ret.handicap = v.id;
+  }
+  return ret;
 }
 
 // --- API pubbliche ---
@@ -233,9 +260,10 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     descriptionHtml: input.description || undefined,
   });
 
-  // productCreate crea una "Default Title" variant automaticamente
-  const variantId = product.variants?.edges?.[0]?.node?.id;
-  if (!variantId) throw new Error("Seat creato ma senza variante");
+  // 4) leggi varianti per ID (niente refetch per titolo/tag)
+  const prodFull = await getProductById(product.id);
+  const variantId = prodFull?.variants?.edges?.[0]?.node?.id;
+  if (!variantId) throw new Error("Seat creato ma senza variante (post read-by-id)");
   return { productId: product.id, variantId };
 }
 
@@ -266,10 +294,7 @@ export async function ensureInventory(opts: {
       productVariant(id: $id) { id inventoryItem { id } }
     }
   `;
-  const varData = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } }>(
-    Q_VAR,
-    { id: opts.variantId }
-  );
+  const varData = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } }>(Q_VAR, { id: opts.variantId });
   const inventoryItemId = varData.productVariant?.inventoryItem?.id;
   if (!inventoryItemId) throw new Error("inventoryItem non trovato per la variante");
 
@@ -280,26 +305,14 @@ export async function ensureInventory(opts: {
     ignoreCompareQuantity: true,
     referenceDocumentUri: `gid://sinflora-xmas/Generate/${Date.now()}`,
     quantities: [
-      {
-        inventoryItemId,
-        locationId,
-        quantity: opts.quantity,
-        compareQuantity: null,
-      },
+      { inventoryItemId, locationId, quantity: opts.quantity, compareQuantity: null },
     ],
   };
 
-  const res = await adminFetchGQL<{
-    inventorySetQuantities: {
-      inventoryAdjustmentGroup?: {
-        createdAt: string;
-        reason: string;
-        referenceDocumentUri?: string | null;
-        changes: { name: string; delta: number; quantityAfterChange: number | null }[];
-      } | null;
-      userErrors: { field?: string[] | null; message: string; code?: string | null }[];
-    };
-  }>(M_INVENTORY_SET_QUANTITIES, { input: gqlInput });
+  const res = await adminFetchGQL<{ inventorySetQuantities: { userErrors: { field?: string[] | null; message: string; code?: string | null }[] } }>(
+    M_INVENTORY_SET_QUANTITIES,
+    { input: gqlInput }
+  );
 
   const errs = res.inventorySetQuantities?.userErrors || [];
   if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map(e => e.message).join(" | ")}`);
@@ -329,36 +342,26 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     // se mancano varianti richieste, le aggiungo
     const needed = variantNamesForMode(input.mode).filter((k) => !current[k]);
     if (needed.length && !input.dryRun) {
-      const variants = needed.map((k) => ({
-        optionValues: [{ optionName: "Title", name: labelForVariant(k) }],
-      }));
-      const out = await adminFetchGQL<{
-        productVariantsBulkCreate: { userErrors: { message: string }[] };
-      }>(M_PRODUCT_VARIANTS_BULK_CREATE, {
-        productId: existing.id,
-        variants,
-        strategy: "REMOVE_STANDALONE_VARIANT",
-      });
+      const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
+      const out = await adminFetchGQL<{ productVariantsBulkCreate: { productVariants?: any[]; userErrors: { message: string }[] } }>(
+        M_PRODUCT_VARIANTS_BULK_CREATE,
+        { productId: existing.id, variants, strategy: "REMOVE_STANDALONE_VARIANT" }
+      );
       const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
       if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
-      // rileggi per ottenere gli ID aggiornati
-      const refreshed = await findProductByExactTitle(title, "Bundle");
-      const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
-        unico: undefined,
-        adulto: undefined,
-        bambino: undefined,
-        handicap: undefined,
+      const created = out.productVariantsBulkCreate.productVariants || [];
+      // unisci mappa esistente + create
+      const createdMap = mapVariantIdsFromNodes(created);
+      return {
+        productId: existing.id,
+        variantMap: {
+          unico: current["unico"] ?? createdMap.unico,
+          adulto: current["adulto"] ?? createdMap.adulto,
+          bambino: current["bambino"] ?? createdMap.bambino,
+          handicap: current["handicap"] ?? createdMap.handicap,
+        },
       };
-      for (const e of refreshed?.variants?.edges || []) {
-        const v = e.node;
-        const t = (v.selectedOptions?.[0]?.value || v.title || "").toLowerCase();
-        if (t.includes("unico")) ret.unico = v.id;
-        else if (t.includes("adulto")) ret.adulto = v.id;
-        else if (t.includes("bambino")) ret.bambino = v.id;
-        else if (t.includes("handicap")) ret.handicap = v.id;
-      }
-      return { productId: refreshed.id, variantMap: ret };
     }
 
     return {
@@ -380,13 +383,8 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       bambino: "gid://shopify/ProductVariant/DRYRUN_BAMBINO",
       handicap: "gid://shopify/ProductVariant/DRYRUN_HANDICAP",
     };
-    if (input.mode === "unico") {
-      ret.adulto = ret.bambino = ret.handicap = undefined;
-    }
-    return {
-      productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN",
-      variantMap: ret,
-    };
+    if (input.mode === "unico") ret.adulto = ret.bambino = ret.handicap = undefined;
+    return { productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN", variantMap: ret };
   }
 
   // 3) crea prodotto (draft)
@@ -399,37 +397,28 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
 
   // 4) crea varianti richieste
   const needed = variantNamesForMode(input.mode);
-  const variants = needed.map((k) => ({
-    optionValues: [{ optionName: "Title", name: labelForVariant(k) }],
-  }));
+  const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
 
-  const out = await adminFetchGQL<{
-    productVariantsBulkCreate: { userErrors: { message: string }[] };
-  }>(M_PRODUCT_VARIANTS_BULK_CREATE, {
-    productId: product.id,
-    variants,
-    strategy: "REMOVE_STANDALONE_VARIANT",
-  });
+  const out = await adminFetchGQL<{ productVariantsBulkCreate: { productVariants?: any[]; userErrors: { message: string }[] } }>(
+    M_PRODUCT_VARIANTS_BULK_CREATE,
+    { productId: product.id, variants, strategy: "REMOVE_STANDALONE_VARIANT" }
+  );
   const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
-  // 5) rileggi per mappa ID
-  const refreshed = await findProductByExactTitle(title, "Bundle");
-  const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
-    unico: undefined,
-    adulto: undefined,
-    bambino: undefined,
-    handicap: undefined,
-  };
-  for (const e of refreshed?.variants?.edges || []) {
-    const v = e.node;
-    const t = (v.selectedOptions?.[0]?.value || v.title || "").toLowerCase();
-    if (t.includes("unico")) ret.unico = v.id;
-    else if (t.includes("adulto")) ret.adulto = v.id;
-    else if (t.includes("bambino")) ret.bambino = v.id;
-    else if (t.includes("handicap")) ret.handicap = v.id;
+  // 5) usa direttamente le varianti restituite (no refetch per titolo/tag)
+  const created = out.productVariantsBulkCreate.productVariants || [];
+  const ret = mapVariantIdsFromNodes(created);
+
+  // Se per qualsiasi motivo non arrivano le varianti, fallback: leggi per ID
+  if (!ret.unico && !ret.adulto && !ret.bambino && !ret.handicap) {
+    const full = await getProductById(product.id);
+    const edges = full?.variants?.edges?.map((e: any) => e.node) || [];
+    const mapped = mapVariantIdsFromNodes(edges);
+    return { productId: product.id, variantMap: mapped };
   }
-  return { productId: refreshed.id, variantMap: ret };
+
+  return { productId: product.id, variantMap: ret };
 }
 
 /**
@@ -439,16 +428,14 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
 export async function setVariantPrices(mapEuro: Record<string, number | undefined>) {
   const variantsInput = Object.entries(mapEuro)
     .filter(([, eur]) => typeof eur === "number")
-    .map(([id, eur]) => ({
-      id,
-      price: (eur as number).toString(), // Admin GraphQL accetta string/decimal
-    }));
+    .map(([id, eur]) => ({ id, price: (eur as number).toString() })); // Admin GraphQL accetta string/decimal
 
   if (!variantsInput.length) return;
 
-  const res = await adminFetchGQL<{
-    productVariantsBulkUpdate: { userErrors: { field?: string[]; message: string }[] };
-  }>(M_PRODUCT_VARIANTS_BULK_UPDATE, { variants: variantsInput });
+  const res = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors: { field?: string[]; message: string }[] } }>(
+    M_PRODUCT_VARIANTS_BULK_UPDATE,
+    { variants: variantsInput }
+  );
 
   const errs = (res as any).productVariantsBulkUpdate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
@@ -468,8 +455,7 @@ async function waitForVariant(variantId: string, tries = 6): Promise<void> {
     } catch {
       // ignora e riprova
     }
-    // backoff: 150, 300, 600, 900, 1200, 1500 ms
-    await delay(150 * (i + 1));
+    await delay(150 * (i + 1)); // 150, 300, 600, 900, 1200, 1500 ms
   }
   throw new Error(`Variant not ready/visible: ${variantId}`);
 }
@@ -478,11 +464,7 @@ async function waitForVariant(variantId: string, tries = 6): Promise<void> {
  * Collega la variante "bundle" (parentVariantId) alla variante "seat" (child) con qty desiderata.
  * Per Handicap usare qty=2.
  */
-export async function upsertBundleComponents(params: {
-  parentVariantId: string;
-  childVariantId: string;
-  qty: number;
-}) {
+export async function upsertBundleComponents(params: { parentVariantId: string; childVariantId: string; qty: number; }) {
   // Evita autocollegamento (errore Shopify)
   if (params.parentVariantId === params.childVariantId) {
     throw new Error("bundle components error: parentVariantId === childVariantId");
@@ -496,26 +478,15 @@ export async function upsertBundleComponents(params: {
   const input = [
     {
       parentProductVariantId: params.parentVariantId,
-      productVariantRelationshipsToCreate: [
-        {
-          id: params.childVariantId,
-          quantity: params.qty,
-        },
-      ],
+      productVariantRelationshipsToCreate: [{ id: params.childVariantId, quantity: params.qty }],
     },
   ];
 
-  const res = await adminFetchGQL<{
-    productVariantRelationshipBulkUpdate: {
-      parentProductVariants?: { id: string }[];
-      userErrors: { code?: string; field?: string[]; message: string }[];
-    };
-  }>(M_VARIANT_REL_BULK_UPDATE, { input });
+  const res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors: { code?: string; field?: string[]; message: string }[] } }>(
+    M_VARIANT_REL_BULK_UPDATE,
+    { input }
+  );
 
   const errs = (res as any).productVariantRelationshipBulkUpdate?.userErrors || [];
-  if (errs.length) {
-    throw new Error(
-      `bundle components error: ${errs.map((e: any) => e.message).join(" | ")}`
-    );
-  }
+  if (errs.length) throw new Error(`bundle components error: ${errs.map((e: any) => e.message).join(" | ")}`);
 }
