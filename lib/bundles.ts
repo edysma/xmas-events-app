@@ -455,6 +455,26 @@ export async function setVariantPrices(mapEuro: Record<string, number | undefine
   const errs = (res as any).productVariantsBulkUpdate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 }
+// Verifica che una variante esista; retry con backoff (fino a ~3s)
+async function waitForVariant(variantId: string, tries = 6): Promise<void> {
+  const Q = /* GraphQL */ `
+    query PV($id: ID!) {
+      productVariant(id: $id) { id }
+    }
+  `;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await adminFetchGQL<{ productVariant: { id: string } | null }>(Q, { id: variantId });
+      if (r?.productVariant?.id) return; // ok, esiste
+    } catch {
+      // ignora e riprova
+    }
+    // backoff: 150, 300, 600, 900, 1200, 1500 ms
+    const ms = 150 * (i + 1);
+    await new Promise((res) => setTimeout(res, ms));
+  }
+  throw new Error(`Variant not ready/visible: ${variantId}`);
+}
 
 /**
  * Collega la variante "bundle" (parentVariantId) alla variante "seat" (child) con qty desiderata.
@@ -465,6 +485,11 @@ export async function upsertBundleComponents(params: {
   childVariantId: string;
   qty: number;
 }) {
+  // 1) assicurati che entrambe le varianti siano "visibili" all'API
+  await waitForVariant(params.parentVariantId);
+  await waitForVariant(params.childVariantId);
+
+  // 2) esegui la mutation bundle
   const input = [
     {
       parentProductVariantId: params.parentVariantId,
@@ -478,9 +503,16 @@ export async function upsertBundleComponents(params: {
   ];
 
   const res = await adminFetchGQL<{
-    productVariantRelationshipBulkUpdate: { userErrors: { code?: string; message: string }[] };
+    productVariantRelationshipBulkUpdate: {
+      parentProductVariants?: { id: string }[];
+      userErrors: { code?: string; field?: string[]; message: string }[];
+    };
   }>(M_VARIANT_REL_BULK_UPDATE, { input });
 
   const errs = (res as any).productVariantRelationshipBulkUpdate?.userErrors || [];
-  if (errs.length) throw new Error(`bundle components error: ${errs.map((e: any) => e.message).join(" | ")}`);
+  if (errs.length) {
+    throw new Error(
+      `bundle components error: ${errs.map((e: any) => e.message).join(" | ")}`
+    );
+  }
 }
