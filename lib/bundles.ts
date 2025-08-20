@@ -43,7 +43,7 @@ type EnsureBundleInput = {
   titleBase: string;
   dayType: DayType;
   mode: TicketMode;
-  "priceTier€": PriceTierEuro; // in EURO: conversione a cent nella setVariantPrices
+  "priceTier€": PriceTierEuro; // in EURO
   templateSuffix?: string;
   image?: string | null;
   tags?: string[];
@@ -58,17 +58,15 @@ type EnsureBundleResult = {
 
 // --- Utils ---
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const euroToCents = (v: number | undefined) =>
-  typeof v === "number" ? Math.round(v * 100) : undefined;
 
 function buildSeatTitle(base: string, date: string, time: string) {
-  // titolo tecnico (nascosto) per i Posti
-  return `${base} — ${date} ${time}`;
+  // Titolo tecnico (nascosto) per i Posti -> formato ISO per evitare collisioni
+  return `${base} — ${date} ${time}`; // es: Viaggio — 2025-12-05 11:00
 }
 function buildBundleTitle(base: string, date: string, time: string) {
-  // titolo visibile per i Biglietti
-  // (manteniamo lo stesso formato, eventuale template del tema farà la resa)
-  return `${base} — ${date} ${time}`;
+  // Titolo visibile per i Biglietti -> formato DD/MM/YYYY per distinguerlo dai Seat
+  const [y, m, d] = date.split("-");
+  return `${base} — ${d}/${m}/${y} ${time}`; // es: Viaggio — 05/12/2025 11:00
 }
 
 // --- GQL snippets (version-agnostic per 2024-07/2024-10) ---
@@ -81,7 +79,8 @@ const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ `
           title
           status
           templateSuffix
-          variants(first: 10) {
+          tags
+          variants(first: 20) {
             edges { node { id title selectedOptions { name value } inventoryItem { id } } }
           }
         }
@@ -152,10 +151,11 @@ const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
   }
 `;
 
-
 // --- Funzioni di supporto interne ---
-async function findProductByExactTitle(title: string) {
-  const q = `title:"${title.replace(/"/g, '\\"')}"`;
+async function findProductByExactTitle(title: string, mustHaveTag?: string) {
+  const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
+  if (mustHaveTag) parts.push(`tag:${mustHaveTag}`);
+  const q = parts.join(" ");
   const data = await adminFetchGQL<{
     products: { edges: { node: any }[] };
   }>(Q_FIND_PRODUCT_BY_TITLE, { q });
@@ -209,8 +209,8 @@ function labelForVariant(k: "unico" | "adulto" | "bambino" | "handicap") {
 export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<EnsureSeatUnitResult> {
   const seatTitle = buildSeatTitle(input.titleBase, input.date, input.time);
 
-  // 1) cerco per titolo esatto
-  const existing = await findProductByExactTitle(seatTitle);
+  // 1) cerco per titolo esatto + tag SeatUnit
+  const existing = await findProductByExactTitle(seatTitle, "SeatUnit");
   if (existing) {
     const variantId = existing.variants?.edges?.[0]?.node?.id;
     if (!variantId) throw new Error("Seat esistente ma senza variante");
@@ -305,8 +305,6 @@ export async function ensureInventory(opts: {
   if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map(e => e.message).join(" | ")}`);
 }
 
-
-
 /**
  * Crea/riusa il prodotto "Biglietto" e le sue varianti in base al mode.
  * Ritorna la mappa variantId per "unico"/"adulto"/"bambino"/"handicap".
@@ -314,8 +312,8 @@ export async function ensureInventory(opts: {
 export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBundleResult> {
   const title = buildBundleTitle(input.titleBase, input.date, input.time);
 
-  // 1) se già esiste, mappa le varianti per Title
-  const existing = await findProductByExactTitle(title);
+  // 1) se già esiste, mappa le varianti per Title (filtrato su tag Bundle)
+  const existing = await findProductByExactTitle(title, "Bundle");
   if (existing) {
     const current: Record<string, string | undefined> = {};
     const edges = existing.variants?.edges || [];
@@ -345,7 +343,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
       // rileggi per ottenere gli ID aggiornati
-      const refreshed = await findProductByExactTitle(title);
+      const refreshed = await findProductByExactTitle(title, "Bundle");
       const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
         unico: undefined,
         adulto: undefined,
@@ -391,7 +389,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     };
   }
 
-  // 3) crea prodotto (draft). La pubblicazione canale non è gestita qui (manca scope write_publications).
+  // 3) crea prodotto (draft)
   const product = await createProductDraft({
     title,
     templateSuffix: input.templateSuffix,
@@ -416,7 +414,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
   if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
   // 5) rileggi per mappa ID
-  const refreshed = await findProductByExactTitle(title);
+  const refreshed = await findProductByExactTitle(title, "Bundle");
   const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
     unico: undefined,
     adulto: undefined,
@@ -435,7 +433,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
 }
 
 /**
- * Aggiorna il prezzo di 1..n varianti (EURO -> cent effettivi lato Shopify).
+ * Aggiorna il prezzo di 1..n varianti (EURO).
  * Accetta mappa { variantId: prezzoEuro }.
  */
 export async function setVariantPrices(mapEuro: Record<string, number | undefined>) {
@@ -443,7 +441,7 @@ export async function setVariantPrices(mapEuro: Record<string, number | undefine
     .filter(([, eur]) => typeof eur === "number")
     .map(([id, eur]) => ({
       id,
-      price: (eur as number).toString(), // Admin GraphQL accetta string o decimal
+      price: (eur as number).toString(), // Admin GraphQL accetta string/decimal
     }));
 
   if (!variantsInput.length) return;
@@ -455,6 +453,7 @@ export async function setVariantPrices(mapEuro: Record<string, number | undefine
   const errs = (res as any).productVariantsBulkUpdate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 }
+
 // Verifica che una variante esista; retry con backoff (fino a ~3s)
 async function waitForVariant(variantId: string, tries = 6): Promise<void> {
   const Q = /* GraphQL */ `
@@ -470,8 +469,7 @@ async function waitForVariant(variantId: string, tries = 6): Promise<void> {
       // ignora e riprova
     }
     // backoff: 150, 300, 600, 900, 1200, 1500 ms
-    const ms = 150 * (i + 1);
-    await new Promise((res) => setTimeout(res, ms));
+    await delay(150 * (i + 1));
   }
   throw new Error(`Variant not ready/visible: ${variantId}`);
 }
@@ -485,6 +483,11 @@ export async function upsertBundleComponents(params: {
   childVariantId: string;
   qty: number;
 }) {
+  // Evita autocollegamento (errore Shopify)
+  if (params.parentVariantId === params.childVariantId) {
+    throw new Error("bundle components error: parentVariantId === childVariantId");
+  }
+
   // 1) assicurati che entrambe le varianti siano "visibili" all'API
   await waitForVariant(params.parentVariantId);
   await waitForVariant(params.childVariantId);
