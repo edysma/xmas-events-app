@@ -1,7 +1,8 @@
 // app/api/events-feed/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-// --- Storefront GraphQL minimal client ---
+/* ---------------- Storefront GQL client (pubblico) ---------------- */
+
 async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<T> {
   const domain = process.env.SHOPIFY_STORE_DOMAIN!;
   const token = process.env.SHOPIFY_STOREFRONT_TOKEN!;
@@ -15,13 +16,14 @@ async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`Storefront ${res.status}`);
-  return res.json().then((j) => j.data);
+  const j = await res.json();
+  return j.data as T;
 }
 
 /** Parser data/ora dal titolo prodotto.
  * Supporta:
- *   - "… — YYYY-MM-DD HH:mm"
- *   - "… — DD/MM/YYYY HH:mm"
+ *  - "… — YYYY-MM-DD HH:mm"  (ISO)
+ *  - "… — DD/MM/YYYY HH:mm"  (italiano)
  * Accetta sia EN DASH "—" sia trattino "-".
  */
 function parseTitleForDateTime(title: string): { date: string; time: string } | null {
@@ -31,7 +33,7 @@ function parseTitleForDateTime(title: string): { date: string; time: string } | 
   const mIso = t.match(/[—-]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s*$/);
   if (mIso) return { date: mIso[1], time: mIso[2] };
 
-  // ITA: DD/MM/YYYY HH:mm
+  // ITA: DD/MM/YYYY HH:mm  -> normalizzo in YYYY-MM-DD
   const mIt = t.match(/[—-]\s*(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})\s*$/);
   if (mIt) return { date: `${mIt[3]}-${mIt[2]}-${mIt[1]}`, time: mIt[4] };
 
@@ -39,18 +41,16 @@ function parseTitleForDateTime(title: string): { date: string; time: string } | 
 }
 
 function isInMonth(date: string, month: string) {
-  return date.startsWith(month + "-"); // month = "YYYY-MM"
+  // month = "YYYY-MM"
+  return date.startsWith(month + "-");
 }
 
 const TZ = "Europe/Rome";
 function weekdayRome(date: string): number {
-  const name = new Intl.DateTimeFormat("it-IT", {
-    weekday: "short",
-    timeZone: TZ,
-  })
+  const name = new Intl.DateTimeFormat("it-IT", { weekday: "short", timeZone: TZ })
     .format(new Date(date + "T12:00:00Z"))
     .toLowerCase();
-  const map: Record<string, number> = { lun:1, mar:2, mer:3, gio:4, ven:5, sab:6, dom:7 };
+  const map: Record<string, number> = { lun: 1, mar: 2, mer: 3, gio: 4, ven: 5, sab: 6, dom: 7 };
   return map[name] ?? 0;
 }
 function dayTypeOf(date: string): "weekday" | "friday" | "saturday" | "sunday" | "holiday" {
@@ -61,6 +61,8 @@ function dayTypeOf(date: string): "weekday" | "friday" | "saturday" | "sunday" |
   return "weekday";
 }
 
+/* ---------------- GQL ---------------- */
+
 const Q_COLLECTION_PRODUCTS = /* GraphQL */ `
   query CollectionByHandle($handle: String!, $cursor: String) {
     collection(handle: $handle) {
@@ -70,10 +72,10 @@ const Q_COLLECTION_PRODUCTS = /* GraphQL */ `
           node {
             id
             title
+            tags
             variants(first: 20) {
               edges { node { id title } }
             }
-            tags
           }
         }
         pageInfo { hasNextPage }
@@ -82,10 +84,31 @@ const Q_COLLECTION_PRODUCTS = /* GraphQL */ `
   }
 `;
 
-// Dalla lista varianti, individua se "unico" oppure triple, e mappa ID.
+/* Esplicito i tipi per evitare l’errore TS sul const data */
+type SfCollectionProductsResp = {
+  collection: {
+    products: {
+      edges: Array<{
+        cursor: string;
+        node: {
+          id: string;
+          title: string;
+          tags: string[];
+          variants: { edges: Array<{ node: { id: string; title: string } }> };
+        };
+      }>;
+      pageInfo: { hasNextPage: boolean };
+    };
+  } | null;
+};
+
+/* Dalla lista varianti capisco se è "unico" o "triple" e mappo gli ID */
 function extractVariantMap(variants: Array<{ title: string; id: string }>) {
-  const out: Record<"unico"|"adulto"|"bambino"|"handicap", string|undefined> = {
-    unico: undefined, adulto: undefined, bambino: undefined, handicap: undefined
+  const out: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
+    unico: undefined,
+    adulto: undefined,
+    bambino: undefined,
+    handicap: undefined,
   };
   for (const v of variants) {
     const t = (v.title || "").toLowerCase();
@@ -94,9 +117,15 @@ function extractVariantMap(variants: Array<{ title: string; id: string }>) {
     else if (t.includes("bambino")) out.bambino = v.id;
     else if (t.includes("handicap")) out.handicap = v.id;
   }
-  const mode: "unico" | "triple" | null = out.unico ? "unico" : (out.adulto || out.bambino || out.handicap) ? "triple" : null;
+  const mode: "unico" | "triple" | null = out.unico
+    ? "unico"
+    : out.adulto || out.bambino || out.handicap
+    ? "triple"
+    : null;
   return { mode, map: out };
 }
+
+/* ---------------- Route pubblica ---------------- */
 
 export async function GET(req: NextRequest) {
   try {
@@ -105,25 +134,26 @@ export async function GET(req: NextRequest) {
     const collection = searchParams.get("collection") || "";
 
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-      return NextResponse.json({ ok:false, error:"invalid_month" }, { status:400 });
+      return NextResponse.json({ ok: false, error: "invalid_month" }, { status: 400 });
     }
     if (!collection) {
-      return NextResponse.json({ ok:false, error:"missing_collection" }, { status:400 });
+      return NextResponse.json({ ok: false, error: "missing_collection" }, { status: 400 });
     }
 
-    // 1) Carica prodotti della collezione dal canale pubblico (Storefront)
+    // 1) Carico i prodotti della collezione dal canale pubblico (Storefront)
     let cursor: string | null = null;
-    const products: Array<{ id: string; title: string; variants: Array<{ id: string; title: string }>, tags: string[] }> = [];
+    const products: Array<{
+      id: string;
+      title: string;
+      tags: string[];
+      variants: Array<{ id: string; title: string }>;
+    }> = [];
 
     while (true) {
-      const data = await sfGQL<{
-        collection: {
-          products: {
-            edges: { cursor: string; node: { id: string; title: string; tags: string[]; variants: { edges: { node: { id: string; title: string } }[] } } }[];
-            pageInfo: { hasNextPage: boolean };
-          };
-        } | null;
-      }>(Q_COLLECTION_PRODUCTS, { handle: collection, cursor });
+      const data: SfCollectionProductsResp = await sfGQL<SfCollectionProductsResp>(
+        Q_COLLECTION_PRODUCTS,
+        { handle: collection, cursor }
+      );
 
       const edges = data.collection?.products.edges || [];
       for (const e of edges) {
@@ -131,14 +161,17 @@ export async function GET(req: NextRequest) {
           id: e.node.id,
           title: e.node.title,
           tags: e.node.tags || [],
-          variants: (e.node.variants?.edges || []).map(x => ({ id: x.node.id, title: x.node.title })),
+          variants: (e.node.variants?.edges || []).map((x) => ({
+            id: x.node.id,
+            title: x.node.title,
+          })),
         });
       }
       if (!data.collection?.products.pageInfo.hasNextPage) break;
       cursor = edges[edges.length - 1].cursor;
     }
 
-    // 2) Filtra solo i "Bundle" (tag Bundle) e costruisci calendario
+    // 2) Tengo solo i “Bundle” (tag Bundle) e costruisco il calendario del mese richiesto
     type Slot = {
       time: string;
       day_type: "weekday" | "friday" | "saturday" | "sunday" | "holiday";
@@ -161,11 +194,12 @@ export async function GET(req: NextRequest) {
 
       const dt = dayTypeOf(parsed.date);
       const slot: Slot = { time: parsed.time, day_type: dt };
+
       if (mode === "unico") {
         if (map.unico) slot.bundleVariantId_single = map.unico;
       } else {
-        if (map.adulto)   slot.bundleVariantId_adulto   = map.adulto;
-        if (map.bambino)  slot.bundleVariantId_bambino  = map.bambino;
+        if (map.adulto) slot.bundleVariantId_adulto = map.adulto;
+        if (map.bambino) slot.bundleVariantId_bambino = map.bambino;
         if (map.handicap) slot.bundleVariantId_handicap = map.handicap;
       }
 
@@ -175,10 +209,13 @@ export async function GET(req: NextRequest) {
 
     const events = Object.keys(byDate)
       .sort()
-      .map((date) => ({ date, slots: byDate[date].sort((a,b) => a.time.localeCompare(b.time)) }));
+      .map((date) => ({ date, slots: byDate[date].sort((a, b) => a.time.localeCompare(b.time)) }));
 
     return NextResponse.json({ month, events }, { status: 200 });
   } catch (err: any) {
-    return NextResponse.json({ month: "", events: [], error: String(err?.message || err) }, { status: 500 });
+    return NextResponse.json(
+      { month: "", events: [], error: String(err?.message || err) },
+      { status: 500 }
+    );
   }
 }
