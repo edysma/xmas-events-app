@@ -10,7 +10,6 @@ export async function GET(req: NextRequest) {
 
   try {
     const dates = await getShopPublicHolidays();
-    // normalizza: deduplica + ordina
     const unique = Array.from(new Set(dates)).sort();
     return NextResponse.json({ ok: true, dates: unique }, { status: 200 });
   } catch (err: any) {
