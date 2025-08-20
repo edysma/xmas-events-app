@@ -7,7 +7,6 @@ import {
   ensureBundle,
   setVariantPrices,
   upsertBundleComponents,
-  bundleTitle,
 } from "@/lib/bundles";
 import type {
   GenerateInput,
@@ -23,7 +22,6 @@ const TZ = "Europe/Rome";
 
 // ---------------- utils date/day ----------------
 
-// Lista date inclusive [start, end], formattate YYYY-MM-DD (UTC-safe)
 function listDates(start: string, end: string): string[] {
   const out: string[] = [];
   const d = new Date(start + "T00:00:00Z");
@@ -35,14 +33,13 @@ function listDates(start: string, end: string): string[] {
   return out;
 }
 
-// Weekday in fuso Europe/Rome → 1..7 (lun..dom)
 function weekdayRome(date: string): number {
   const name = new Intl.DateTimeFormat("it-IT", {
     weekday: "short",
     timeZone: TZ,
   })
     .format(new Date(date + "T12:00:00Z"))
-    .toLowerCase(); // evita bordi DST
+    .toLowerCase();
   const map: Record<string, number> = {
     lun: 1,
     mar: 2,
@@ -87,23 +84,19 @@ function pickTierForDate(
   fridayAsWeekend: boolean,
   exceptionsByDate?: Record<string, PriceTierEuro>
 ): PriceTierEuro | undefined {
-  // 1) eccezioni per data
   if (exceptionsByDate && exceptionsByDate[date]) return exceptionsByDate[date];
 
-  // 2) per tipo giorno
   if (dt === "holiday") return prices.holiday;
   if (dt === "saturday") return prices.saturday;
   if (dt === "sunday") return prices.sunday;
 
   if (dt === "friday") {
     if (fridayAsWeekend) {
-      // venerdì come weekend → usa sabato come riferimento (fallback a domenica/holiday/feriali)
       return prices.saturday ?? prices.sunday ?? prices.holiday ?? prices.feriali;
     }
     return prices.friday ?? prices.feriali;
   }
 
-  // weekday (lun-gio): prova perDay, altrimenti feriali
   const wk = weekdayKey(date);
   const perDay = prices.feriali?.perDay;
   if (perDay) {
@@ -127,184 +120,167 @@ function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
 // ---------------- route ----------------
 
 export async function POST(req: NextRequest) {
-  const secret = req.headers.get("x-admin-secret");
-  if (!secret || secret !== process.env.ADMIN_SECRET) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
-
-  let body: GenerateInput & { dryRun?: boolean };
   try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
-  }
+    const secret = req.headers.get("x-admin-secret");
+    if (!secret || secret !== process.env.ADMIN_SECRET) {
+      return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    }
 
-  // Per ora: solo source:"manual"
-  if (body.source !== "manual") {
-    return NextResponse.json(
-      { ok: false, error: "source_not_supported_yet", detail: 'Per ora usa {"source":"manual"}' },
-      { status: 400 }
-    );
-  }
+    let body: GenerateInput & { dryRun?: boolean; templateSuffix?: string; tags?: string[]; description?: string; imageUrl?: string };
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+    }
 
-  const input = body as ManualInput & { dryRun?: boolean };
-  const dryRun = input.dryRun !== false; // default true
+    if (body.source !== "manual") {
+      return NextResponse.json(
+        { ok: false, error: "source_not_supported_yet", detail: 'Per ora usa {"source":"manual"}' },
+        { status: 400 }
+      );
+    }
 
-  // Opzioni extra (facoltative) non tipizzate nella union
-  const templateSuffix = (input as any).templateSuffix as string | undefined;
-  const tags = (input as any).tags as string[] | undefined;
-  const description = (input as any).description as string | undefined;
-  const imageUrl = (input as any).imageUrl as string | undefined; // gestiremo solo in run reale
+    const input = body as ManualInput & { dryRun?: boolean; templateSuffix?: string; tags?: string[]; description?: string; imageUrl?: string };
+    const dryRun = input.dryRun !== false; // default true
 
-  // Festivi dal metafield
-  const holidaysArr = await getShopPublicHolidays();
-  const holidays = new Set(holidaysArr);
+    const templateSuffix = input.templateSuffix;
+    const tags = input.tags;
+    const description = input.description;
+    const imageUrl = input.imageUrl;
 
-  const dates = listDates(input.startDate, input.endDate);
-  const preview: PreviewItem[] = [];
-  const warningsGlobal: string[] = [];
+    const holidaysArr = await getShopPublicHolidays();
+    const holidays = new Set(holidaysArr);
 
-  // Contatori (in run reale popoleremo questi)
-  let seatsCreated = 0;
-  let bundlesCreated = 0;
-  let variantsCreated = 0;
+    const dates = listDates(input.startDate, input.endDate);
+    const preview: PreviewItem[] = [];
+    const warningsGlobal: string[] = [];
 
-  for (const date of dates) {
-    const dt = dayTypeOf(date, holidays);
+    let seatsCreated = 0;
+    let bundlesCreated = 0;
+    let variantsCreated = 0;
 
-    // slot: weekend vs weekday (venerdì segue flag fridayAsWeekend)
-    const useWeekendSlots =
-      dt === "saturday" || dt === "sunday" || dt === "holiday" || (dt === "friday" && input.fridayAsWeekend);
-    const slots = useWeekendSlots ? input.weekendSlots : input.weekdaySlots;
+    for (const date of dates) {
+      const dt = dayTypeOf(date, holidays);
 
-    // prezzi & modalità
-    const tier = pickTierForDate(date, dt, input["prices€"], input.fridayAsWeekend, input.exceptionsByDate);
-    const mode = decideMode(tier);
+      const useWeekendSlots =
+        dt === "saturday" || dt === "sunday" || dt === "holiday" || (dt === "friday" && input.fridayAsWeekend);
+      const slots = useWeekendSlots ? input.weekendSlots : input.weekdaySlots;
 
-    for (const time of slots) {
-      // se tier o mode mancano, registriamo preview con warning e passiamo oltre
-      const item: PreviewItem = {
-        date,
-        time,
-        dayType: dt,
-        "pricePlan€": tier,
-        mode: mode as any,
-      };
+      const tier = pickTierForDate(date, dt, input["prices€"], input.fridayAsWeekend, input.exceptionsByDate);
+      const mode = decideMode(tier);
 
-      if (!tier || !mode) {
-        item.warnings = item.warnings ?? [];
-        if (!tier) item.warnings.push("Nessun listino prezzi per questo slot");
-        if (!mode) item.warnings.push("Definisci 'unico' o almeno una tra adulto/bambino/handicap");
-        if (preview.length < 10) preview.push(item);
-        continue;
-      }
-
-      // ---------- Seat Unit ----------
-      const seat = await ensureSeatUnit({
-        date,
-        time,
-        titleBase: input.eventHandle,
-        tags,
-        description,
-        templateSuffix,
-        // image non necessaria per il prodotto nascosto
-        dryRun,
-      });
-
-      // stock iniziale (capacityPerSlot)
-      await ensureInventory({
-        variantId: seat.variantId,
-        locationId: input.locationId,
-        quantity: input.capacityPerSlot,
-        dryRun,
-      });
-
-      // ---------- Bundle ----------
-      const bundle = await ensureBundle({
-        eventHandle: input.eventHandle,
-        date,
-        time,
-        titleBase: input.eventHandle,
-        templateSuffix,
-        tags,
-        description,
-        // imageUrl: se necessario, in run reale useremo uploadFileFromUrl in futuro
-        dayType: dt,
-        mode,
-        "priceTier€": tier,
-        dryRun,
-      });
-
-      // ---------- Componenti (collega variante seat) ----------
-      // qty 1 per tutte, tranne handicap = 2
-      const compOps: [keyof typeof bundle.variants, number][] =
-        mode === "unico"
-          ? [["unico", 1]]
-          : [["adulto", 1], ["bambino", 1], ["handicap", 2]];
-
-      for (const [k, qty] of compOps) {
-        const parentVariantId = bundle.variants[k];
-        if (!parentVariantId) continue; // se la variante non esiste, salta
-        await upsertBundleComponents({
-          parentVariantId,
-          childVariantId: seat.variantId,
-          qty,
-          dryRun,
-        });
-      }
-
-      // ---------- Prezzi ----------
-      if (mode === "unico" && typeof tier.unico === "number" && bundle.variants.unico) {
-        await setVariantPrices({
-          variantId: bundle.variants.unico,
-          priceEuro: tier.unico,
-          dryRun,
-        });
-      }
-      if (mode === "triple") {
-        if (typeof tier.adulto === "number" && bundle.variants.adulto) {
-          await setVariantPrices({ variantId: bundle.variants.adulto, priceEuro: tier.adulto, dryRun });
-        }
-        if (typeof tier.bambino === "number" && bundle.variants.bambino) {
-          await setVariantPrices({ variantId: bundle.variants.bambino, priceEuro: tier.bambino, dryRun });
-        }
-        if (typeof tier.handicap === "number" && bundle.variants.handicap) {
-          await setVariantPrices({ variantId: bundle.variants.handicap, priceEuro: tier.handicap, dryRun });
-        }
-      }
-
-      // ---------- Summary & preview ----------
-      if (!dryRun) {
-        if (seat.created) seatsCreated += 1;
-        if (bundle.created) bundlesCreated += 1;
-        // Nota: in questa versione non distinguiamo quante varianti nuove vs riusate
-        // (opzionale: conteggio preciso dopo un refetch)
-      }
-
-      if (preview.length < 10) {
-        item.seatProductId = seat.productId;
-        item.bundleProductId = bundle.productId;
-        item.variantMap = {
-          unico: bundle.variants.unico,
-          adulto: bundle.variants.adulto,
-          bambino: bundle.variants.bambino,
-          handicap: bundle.variants.handicap,
+      for (const time of slots) {
+        const item: PreviewItem = {
+          date,
+          time,
+          dayType: dt,
+          "pricePlan€": tier,
+          mode: mode as any,
         };
-        preview.push(item);
+
+        if (!tier || !mode) {
+          item.warnings = item.warnings ?? [];
+          if (!tier) item.warnings.push("Nessun listino prezzi per questo slot");
+          if (!mode) item.warnings.push("Definisci 'unico' o almeno una tra adulto/bambino/handicap");
+          if (preview.length < 10) preview.push(item);
+          continue;
+        }
+
+        const seat = await ensureSeatUnit({
+          date,
+          time,
+          titleBase: input.eventHandle,
+          tags,
+          description,
+          templateSuffix,
+          dryRun,
+        });
+
+        await ensureInventory({
+          variantId: seat.variantId,
+          locationId: input.locationId,
+          quantity: input.capacityPerSlot,
+          dryRun,
+        });
+
+        const bundle = await ensureBundle({
+          eventHandle: input.eventHandle,
+          date,
+          time,
+          titleBase: input.eventHandle,
+          templateSuffix,
+          tags,
+          description,
+          dayType: dt,
+          mode,
+          "priceTier€": tier,
+          dryRun,
+        });
+
+        const compOps: [keyof typeof bundle.variants, number][] =
+          mode === "unico" ? [["unico", 1]] : [["adulto", 1], ["bambino", 1], ["handicap", 2]];
+
+        for (const [k, qty] of compOps) {
+          const parentVariantId = bundle.variants[k];
+          if (!parentVariantId) continue;
+          await upsertBundleComponents({
+            parentVariantId,
+            childVariantId: seat.variantId,
+            qty,
+            dryRun,
+          });
+        }
+
+        if (mode === "unico" && typeof tier.unico === "number" && bundle.variants.unico) {
+          await setVariantPrices({ variantId: bundle.variants.unico, priceEuro: tier.unico, dryRun });
+        }
+        if (mode === "triple") {
+          if (typeof tier.adulto === "number" && bundle.variants.adulto) {
+            await setVariantPrices({ variantId: bundle.variants.adulto, priceEuro: tier.adulto, dryRun });
+          }
+          if (typeof tier.bambino === "number" && bundle.variants.bambino) {
+            await setVariantPrices({ variantId: bundle.variants.bambino, priceEuro: tier.bambino, dryRun });
+          }
+          if (typeof tier.handicap === "number" && bundle.variants.handicap) {
+            await setVariantPrices({ variantId: bundle.variants.handicap, priceEuro: tier.handicap, dryRun });
+          }
+        }
+
+        if (!dryRun) {
+          if (seat.created) seatsCreated += 1;
+          if (bundle.created) bundlesCreated += 1;
+        }
+
+        if (preview.length < 10) {
+          item.seatProductId = seat.productId;
+          item.bundleProductId = bundle.productId;
+          item.variantMap = {
+            unico: bundle.variants.unico,
+            adulto: bundle.variants.adulto,
+            bambino: bundle.variants.bambino,
+            handicap: bundle.variants.handicap,
+          };
+          preview.push(item);
+        }
       }
     }
+
+    const resp: GenerateResponse = {
+      ok: true,
+      summary: { seatsCreated, bundlesCreated, variantsCreated },
+      preview,
+      warnings: warningsGlobal,
+    };
+    return NextResponse.json(resp, { status: 200 });
+  } catch (err: any) {
+    // Restituiamo SEMPRE JSON in caso di eccezione
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "internal_error",
+        detail: String(err?.message || err),
+      },
+      { status: 500 }
+    );
   }
-
-  const resp: GenerateResponse = {
-    ok: true,
-    summary: {
-      seatsCreated,
-      bundlesCreated,
-      variantsCreated,
-    },
-    preview,
-    warnings: warningsGlobal,
-  };
-
-  return NextResponse.json(resp, { status: 200 });
 }
