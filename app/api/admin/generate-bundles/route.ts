@@ -264,9 +264,9 @@ export async function POST(req: NextRequest) {
             if (bambino && typeof tier.bambino === "number") pricesToSet[bambino] = tier.bambino;
             if (handicap && typeof tier.handicap === "number") pricesToSet[handicap] = tier.handicap;
           }
-          if (Object.keys(pricesToSet).length) {
-            await setVariantPrices(pricesToSet);
-          }
+         if (Object.keys(pricesToSet).length) {
+  await setVariantPrices(bundle.productId, pricesToSet);
+}
         }
 
         // ---------- Preview ----------
