@@ -124,8 +124,8 @@ const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
 `;
 
 const M_PRODUCT_VARIANTS_BULK_UPDATE = /* GraphQL */ `
-  mutation VariantsBulkUpdate($variants: [ProductVariantsBulkInput!]!) {
-    productVariantsBulkUpdate(variants: $variants) {
+  mutation VariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
       productVariants { id title price }
       userErrors { field message }
     }
@@ -425,17 +425,22 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
  * Aggiorna il prezzo di 1..n varianti (EURO).
  * Accetta mappa { variantId: prezzoEuro }.
  */
-export async function setVariantPrices(mapEuro: Record<string, number | undefined>) {
+export async function setVariantPrices(
+  productId: string,
+  mapEuro: Record<string, number | undefined>
+) {
   const variantsInput = Object.entries(mapEuro)
     .filter(([, eur]) => typeof eur === "number")
-    .map(([id, eur]) => ({ id, price: (eur as number).toString() })); // Admin GraphQL accetta string/decimal
+    .map(([id, eur]) => ({
+      id,
+      price: (eur as number).toString(),
+    }));
 
   if (!variantsInput.length) return;
 
-  const res = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors: { field?: string[]; message: string }[] } }>(
-    M_PRODUCT_VARIANTS_BULK_UPDATE,
-    { variants: variantsInput }
-  );
+  const res = await adminFetchGQL<{
+    productVariantsBulkUpdate: { userErrors: { field?: string[]; message: string }[] };
+  }>(M_PRODUCT_VARIANTS_BULK_UPDATE, { productId, variants: variantsInput });
 
   const errs = (res as any).productVariantsBulkUpdate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
