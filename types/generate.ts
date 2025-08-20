@@ -68,19 +68,19 @@ export type GenerateInput = ManualInput | FeedInput;
 export type PreviewItem = {
   date: YYYY_MM_DD;
   time: HH_mm;
-  dayType?: DayType;              // aggiunto: weekday | friday | saturday | sunday | holiday
-  pricePlan€?: PriceTierEuro;     // aggiunto: prezzi applicati per questo slot (in Euro)
-  mode?: "unico" | "triple";      // aggiunto: 1 variante (unico) o 3 varianti (adulto/bambino/handicap)
+  dayType?: DayType;               // weekday | friday | saturday | sunday | holiday
+  "pricePlan€"?: PriceTierEuro;    // prezzi applicati per questo slot (in Euro)
+  mode?: "unico" | "triple";       // 1 variante (unico) o 3 varianti (adulto/bambino/handicap)
 
-  seatProductId?: string;         // prodotto "Posto" (nascosto) — valorizzato in run reale
-  bundleProductId?: string;       // prodotto "Biglietto" (visibile) — valorizzato in run reale
-  variantMap?: {                  // mappa varianti bundle create/riusate — valorizzato in run reale
+  seatProductId?: string;          // prodotto "Posto" (nascosto)
+  bundleProductId?: string;        // prodotto "Biglietto" (visibile)
+  variantMap?: {                   // mappa varianti bundle
     unico?: string;
     adulto?: string;
     bambino?: string;
     handicap?: string;
   };
-  warnings?: string[];            // eventuali note su prezzi mancanti o ambiguità
+  warnings?: string[];
 };
 
 
