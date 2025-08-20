@@ -1,51 +1,88 @@
 // lib/bundles.ts
-// Helpers per generatore Seat Units + Bundles
-// - conversione prezzi, formattazione titoli
-// - ensureSeatUnit / ensureInventory / ensureBundle / setVariantPrices / upsertBundleComponents
-// - tutte le funzioni rispettano `dryRun` (default true) per non scrivere su Shopify
+// Helpers per creare/riusare Posti (Seat Unit) e Biglietti (Bundle) e collegare componenti.
+// Allineato a Admin GraphQL 2024-07/2024-10:
+// - productVariantsBulkCreate variants: [ProductVariantsBulkInput!]!
+// - productVariantRelationshipBulkUpdate input: [ProductVariantRelationshipUpdateInput!]!
+// - inventorySetQuantities (name: "available", reason: "correction")
 
 import { adminFetchGQL, getDefaultLocationId } from "@/lib/shopify-admin";
-import type { DayType, PriceTierEuro, TicketType } from "@/types/generate";
 
-// ===================== Utils =====================
+// --- Tipi locali (ASCII only) ---
+export type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
+export type TicketMode = "unico" | "triple";
 
-export function euroToCents(eur: number): number {
-  // arrotonda a 2 decimali e converte in cent
-  return Math.round(Number((eur ?? 0).toFixed(2)) * 100);
+export type PriceTierEuro = {
+  unico?: number;
+  adulto?: number;
+  bambino?: number;
+  handicap?: number;
+};
+
+type EnsureSeatUnitInput = {
+  date: string; // YYYY-MM-DD
+  time: string; // HH:mm
+  titleBase: string;
+  templateSuffix?: string;
+  image?: string | null;
+  tags?: string[];
+  description?: string | null;
+  dryRun?: boolean;
+};
+
+type EnsureSeatUnitResult = {
+  productId: string;
+  variantId: string;
+};
+
+// attenzione: chi chiama può passare "priceTier€" nel payload runtime.
+// Qui la proprietà è quotata per evitare errori TS su "€".
+type EnsureBundleInput = {
+  eventHandle: string;
+  date: string; // YYYY-MM-DD
+  time: string; // HH:mm
+  titleBase: string;
+  dayType: DayType;
+  mode: TicketMode;
+  "priceTier€": PriceTierEuro; // in EURO: conversione a cent nella setVariantPrices
+  templateSuffix?: string;
+  image?: string | null;
+  tags?: string[];
+  description?: string | null;
+  dryRun?: boolean;
+};
+
+type EnsureBundleResult = {
+  productId: string;
+  variantMap: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined>;
+};
+
+// --- Utils ---
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const euroToCents = (v: number | undefined) =>
+  typeof v === "number" ? Math.round(v * 100) : undefined;
+
+function buildSeatTitle(base: string, date: string, time: string) {
+  // titolo tecnico (nascosto) per i Posti
+  return `${base} — ${date} ${time}`;
+}
+function buildBundleTitle(base: string, date: string, time: string) {
+  // titolo visibile per i Biglietti
+  // (manteniamo lo stesso formato, eventuale template del tema farà la resa)
+  return `${base} — ${date} ${time}`;
 }
 
-export function seatTitle(titleBase: string, date: string, time: string) {
-  // Seat Unit (nascosto)
-  return `${titleBase} — ${date} ${time}`;
-}
-
-export function bundleTitle(titleBase: string, date: string, time: string) {
-  // Bundle (visibile)
-  const [y, m, d] = date.split("-");
-  return `${titleBase} — ${d}/${m}/${y} ${time}`;
-}
-
-export function variantNameFromTicketType(t: TicketType): string {
-  if (t === "unico") return "Biglietto unico";
-  if (t === "adulto") return "Adulto";
-  if (t === "bambino") return "Bambino";
-  if (t === "handicap") return "Handicap";
-  return String(t);
-}
-
-// ===================== Shopify GraphQL: fragments / queries =====================
-
-// cerca prodotto per titolo esatto
-const Q_PRODUCT_BY_TITLE = /* GraphQL */ `
-  query ProductByTitle($q: String!) {
+// --- GQL snippets (version-agnostic per 2024-07/2024-10) ---
+const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ `
+  query FindProductByTitle($q: String!) {
     products(first: 1, query: $q) {
       edges {
         node {
           id
           title
           status
+          templateSuffix
           variants(first: 10) {
-            nodes { id title inventoryItem { id } }
+            edges { node { id title selectedOptions { name value } inventoryItem { id } } }
           }
         }
       }
@@ -53,382 +90,376 @@ const Q_PRODUCT_BY_TITLE = /* GraphQL */ `
   }
 `;
 
-// crea prodotto
 const M_PRODUCT_CREATE = /* GraphQL */ `
-  mutation ProductCreate($input: ProductInput!) {
+  mutation CreateProduct($input: ProductCreateInput!) {
     productCreate(input: $input) {
-      product {
-        id
-        title
-        status
-        variants(first: 10) { nodes { id title inventoryItem { id } } }
-      }
+      product { id title status templateSuffix variants(first: 5) { edges { node { id title } } } }
       userErrors { field message }
     }
   }
 `;
 
-// crea varianti in bulk
+// Nota: usare ProductVariantsBulkInput (NON "...CreateInput")
 const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
-  mutation ProductVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkCreateInput!]!) {
-    productVariantsBulkCreate(productId: $productId, variants: $variants) {
-      product { id }
+  mutation VariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy) {
+    productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
+      productVariants { id title selectedOptions { name value } }
       userErrors { field message }
     }
   }
 `;
 
-// aggiorna prezzo variante
-const M_PRODUCT_VARIANT_UPDATE = /* GraphQL */ `
-  mutation ProductVariantUpdate($input: ProductVariantInput!) {
-    productVariantUpdate(input: $input) {
-      productVariant { id title price }
+const M_PRODUCT_VARIANTS_BULK_UPDATE = /* GraphQL */ `
+  mutation VariantsBulkUpdate($variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(variants: $variants) {
+      productVariants { id title price }
       userErrors { field message }
     }
   }
 `;
 
-// inventoryItemId di una variante
-const Q_VARIANT_INVENTORY_ITEM = /* GraphQL */ `
-  query VariantInventoryItem($id: ID!) {
-    productVariant(id: $id) {
-      id
-      inventoryItem { id }
+// Bundles — aggiunge componenti (child variants) al parent variant
+const M_VARIANT_REL_BULK_UPDATE = /* GraphQL */ `
+  mutation BundleUpsert($input: [ProductVariantRelationshipUpdateInput!]!) {
+    productVariantRelationshipBulkUpdate(input: $input) {
+      parentProductVariants {
+        id
+        productVariantComponents(first: 50) {
+          nodes { id productVariant { id } }
+        }
+      }
+      userErrors { code field message }
     }
   }
 `;
 
-// --- GQL: inventorySetQuantities (payload 2024-07+ corretto)
+// Inventario: set assoluto "available" con reason "correction"
 const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
-  mutation InvSet($input: InventorySetQuantitiesInput!) {
+  mutation SetQty($input: [InventorySetQuantityInput!]!) {
     inventorySetQuantities(input: $input) {
       inventoryAdjustmentGroup {
-        createdAt
         reason
-        referenceDocumentUri
         changes {
           name
           delta
           quantityAfterChange
+          item { id }
+          location { id }
         }
       }
-      userErrors {
-        field
-        message
-        code
-      }
-    }
-  }
-`;
-
-// bundle components (relazioni variante-bundle → componente seat)
-const M_PRODUCT_VARIANT_REL_BULK_UPDATE = /* GraphQL */ `
-  mutation ProductVariantRelationshipBulkUpdate($operations: [ProductVariantRelationshipBulkUpdateOperationInput!]!) {
-    productVariantRelationshipBulkUpdate(operations: $operations) {
-      job { id done }
       userErrors { field message }
     }
   }
 `;
 
-// ===================== Core helpers =====================
-
-export type EnsureSeatUnitInput = {
-  date: string;           // YYYY-MM-DD
-  time: string;           // HH:mm
-  titleBase: string;
-  tags?: string[];
-  description?: string;   // HTML
-  imageId?: string;       // opzionale: ID file Shopify già caricato
-  templateSuffix?: string;// es: "seat"
-  dryRun?: boolean;       // default true → non scrive
-};
-
-export type EnsureSeatUnitResult = {
-  productId: string;
-  variantId: string;
-  created: boolean;
-};
-
-export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<EnsureSeatUnitResult> {
-  const dryRun = input.dryRun ?? true;
-  const title = seatTitle(input.titleBase, input.date, input.time);
-
-  // cerca per titolo esatto
+// --- Funzioni di supporto interne ---
+async function findProductByExactTitle(title: string) {
   const q = `title:"${title.replace(/"/g, '\\"')}"`;
-  const found = await adminFetchGQL<{ products: { edges: { node: any }[] } }>(Q_PRODUCT_BY_TITLE, { q });
-  const node = found.products?.edges?.[0]?.node;
-  if (node) {
-    const variant = node.variants?.nodes?.[0];
-    return { productId: node.id, variantId: variant?.id, created: false };
-  }
-
-  if (dryRun) {
-    // simulazione: ID fittizi coerenti
-    return {
-      productId: "gid://shopify/Product/NEW_SEAT_DRYRUN",
-      variantId: "gid://shopify/ProductVariant/NEW_SEAT_VAR_DRYRUN",
-      created: true,
-    };
-  }
-
-  // crea prodotto DRAFT con una sola variante
-  const productInput: any = {
-    title,
-    status: "DRAFT",
-    tags: input.tags?.join(", "),
-    bodyHtml: input.description ?? undefined,
-    templateSuffix: input.templateSuffix ?? undefined,
-    // nessuna immagine necessaria per seat
-  };
-
-  const created = await adminFetchGQL<{
-    productCreate: { product: any; userErrors: { field?: string[]; message: string }[] };
-  }>(M_PRODUCT_CREATE, { input: productInput });
-
-  const errs = created.productCreate?.userErrors ?? [];
-  if (errs.length) {
-    const msg = errs.map((e) => e.message).join(" | ");
-    throw new Error(`productCreate (seat) error: ${msg}`);
-  }
-  const prod = created.productCreate?.product;
-  const var0 = prod?.variants?.nodes?.[0];
-  return { productId: prod.id, variantId: var0?.id, created: true };
+  const data = await adminFetchGQL<{
+    products: { edges: { node: any }[] };
+  }>(Q_FIND_PRODUCT_BY_TITLE, { q });
+  return data.products.edges[0]?.node ?? null;
 }
 
-export type EnsureInventoryInput = {
-  variantId: string;
-  locationId?: string; // se omesso, getDefaultLocationId()
-  quantity: number;    // stock desiderato (set assoluto)
-  dryRun?: boolean;
-};
+async function createProductDraft(params: {
+  title: string;
+  templateSuffix?: string;
+  tags?: string[];
+  descriptionHtml?: string | null;
+}) {
+  const input: any = {
+    title: params.title,
+    status: "DRAFT",
+  };
+  if (params.templateSuffix) input.templateSuffix = params.templateSuffix;
+  if (params.tags?.length) input.tags = params.tags.join(", ");
+  if (params.descriptionHtml) input.descriptionHtml = params.descriptionHtml;
 
-// Imposta la quantità AVAILABLE alla location (set assoluto, non delta)
-export async function ensureInventory(input: EnsureInventoryInput): Promise<{ ok: true; adjusted?: any[]; dryRun?: true; set?: any }> {
-  const dryRun = input.dryRun ?? true;
-  const locationId = input.locationId ?? (await getDefaultLocationId());
+  const res = await adminFetchGQL<{
+    productCreate: {
+      product?: any;
+      userErrors: { field?: string[]; message: string }[];
+    };
+  }>(M_PRODUCT_CREATE, { input });
 
-  if (dryRun) {
-    // non scrive, ma torna anteprima utile
+  const errs = res.productCreate.userErrors;
+  if (errs?.length) throw new Error(`productCreate error: ${errs.map(e => e.message).join(" | ")}`);
+  const product = res.productCreate.product;
+  if (!product?.id) throw new Error("productCreate: prodotto non creato");
+  return product;
+}
+
+function variantNamesForMode(mode: TicketMode): Array<"unico" | "adulto" | "bambino" | "handicap"> {
+  return mode === "unico" ? ["unico"] : ["adulto", "bambino", "handicap"];
+}
+
+function labelForVariant(k: "unico" | "adulto" | "bambino" | "handicap") {
+  if (k === "unico") return "Biglietto unico";
+  if (k === "adulto") return "Adulto";
+  if (k === "bambino") return "Bambino";
+  return "Handicap";
+}
+
+// --- API pubbliche ---
+
+/**
+ * Crea/riusa il prodotto "Posto" (nascosto/draft) con 1 sola variante.
+ */
+export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<EnsureSeatUnitResult> {
+  const seatTitle = buildSeatTitle(input.titleBase, input.date, input.time);
+
+  // 1) cerco per titolo esatto
+  const existing = await findProductByExactTitle(seatTitle);
+  if (existing) {
+    const variantId = existing.variants?.edges?.[0]?.node?.id;
+    if (!variantId) throw new Error("Seat esistente ma senza variante");
+    return { productId: existing.id, variantId };
+  }
+
+  // 2) se dryRun, ritorno placeholder
+  if (input.dryRun) {
     return {
-      ok: true,
-      dryRun: true,
-      set: { variantId: input.variantId, locationId, name: "AVAILABLE", quantity: input.quantity },
+      productId: "gid://shopify/Product/NEW_SEAT_DRYRUN",
+      variantId: "gid://shopify/ProductVariant/NEW_SEAT_VARIANT_DRYRUN",
     };
   }
 
-  // 1) prendi inventoryItemId
-  const q = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } | null }>(
-    Q_VARIANT_INVENTORY_ITEM,
-    { id: input.variantId }
-  );
-  const inventoryItemId = q?.productVariant?.inventoryItem?.id;
-  if (!inventoryItemId) throw new Error("inventoryItemId non trovato per la variante");
+  // 3) crea prodotto draft
+  const product = await createProductDraft({
+    title: seatTitle,
+    templateSuffix: input.templateSuffix,
+    tags: Array.from(new Set([...(input.tags || []), "SeatUnit"])),
+    descriptionHtml: input.description || undefined,
+  });
 
-  // 2) inventorySetQuantities — payload 2024-07+ (name/reason/quantities)
-  const gqlInput = {
-    name: "available",              // enum InventoryQuantityName
-    reason: "correction",           // enum InventoryAdjustmentReason
-    ignoreCompareQuantity: true,    // evitiamo CAS
-    referenceDocumentUri: `gid://sinflora-xmas/Generate/${Date.now()}`,
-    quantities: [
-      {
-        inventoryItemId,
-        locationId,
-        quantity: input.quantity,   // set assoluto
-        compareQuantity: null,      // ignorato se ignoreCompareQuantity=true
-      },
-    ],
-  };
+  // productCreate crea una "Default Title" variant automaticamente
+  const variantId = product.variants?.edges?.[0]?.node?.id;
+  if (!variantId) throw new Error("Seat creato ma senza variante");
+  return { productId: product.id, variantId };
+}
+
+/**
+ * Setta lo stock "available" assoluto sulla variante e location indicata.
+ * Usa inventorySetQuantities con reason "correction".
+ */
+export async function ensureInventory(opts: {
+  variantId: string;
+  locationId?: string;
+  quantity: number;
+}) {
+  const locationId = opts.locationId || (await getDefaultLocationId());
+
+  // Per inventorySetQuantities serve l'inventoryItemId
+  const Q_VAR = /* GraphQL */ `
+    query VariantInv($id: ID!) {
+      productVariant(id: $id) {
+        id
+        inventoryItem { id }
+      }
+    }
+  `;
+  const varData = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } }>(
+    Q_VAR,
+    { id: opts.variantId }
+  );
+  const inventoryItemId = varData.productVariant?.inventoryItem?.id;
+  if (!inventoryItemId) throw new Error("inventoryItem non trovato per la variante");
+
+  const input = [
+    {
+      inventoryItemId,
+      locationId,
+      name: "available",
+      reason: "correction",
+      quantity: opts.quantity,
+      ignoreCompareQuantity: true,
+    },
+  ];
 
   const res = await adminFetchGQL<{
     inventorySetQuantities: {
-      inventoryAdjustmentGroup?: {
-        createdAt: string;
-        reason: string;
-        referenceDocumentUri?: string | null;
-        changes: { name: string; delta: number; quantityAfterChange: number | null }[];
-      } | null;
-      userErrors: { field?: string[] | null; message: string; code?: string | null }[];
+      userErrors: { field?: string[]; message: string }[];
     };
-  }>(M_INVENTORY_SET_QUANTITIES, { input: gqlInput });
+  }>(M_INVENTORY_SET_QUANTITIES, { input });
 
-  const errs = res.inventorySetQuantities?.userErrors ?? [];
-  if (errs.length) {
-    const msg = errs.map((e) => e.message).join(" | ");
-    throw new Error(`inventorySetQuantities error: ${msg}`);
-  }
-  return {
-    ok: true,
-    adjusted: res.inventorySetQuantities?.inventoryAdjustmentGroup?.changes ?? [],
-  };
+  const errs = (res as any).inventorySetQuantities?.userErrors || [];
+  if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map((e: any) => e.message).join(" | ")}`);
 }
 
-export type EnsureBundleInput = {
-  eventHandle: string;
-  date: string;              // YYYY-MM-DD
-  time: string;              // HH:mm
-  titleBase: string;
-  templateSuffix?: string;
-  tags?: string[];
-  description?: string;
-  imageId?: string;          // opzionale: ID file
-  dayType: DayType;
-  mode: "unico" | "triple";
-  "priceTier€": PriceTierEuro; // in EURO — conversione a cent in setVariantPrices
-  dryRun?: boolean;
-};
-
-export type EnsureBundleResult = {
-  productId: string;
-  // mappa varianti create/riusate (id)
-  variants: Partial<Record<TicketType, string>>;
-  created: boolean;
-};
-
-// Crea/riusa il prodotto bundle e assicura le varianti necessarie (senza collegare componenti)
+/**
+ * Crea/riusa il prodotto "Biglietto" e le sue varianti in base al mode.
+ * Ritorna la mappa variantId per "unico"/"adulto"/"bambino"/"handicap".
+ */
 export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBundleResult> {
-  const dryRun = input.dryRun ?? true;
-  const title = bundleTitle(input.titleBase, input.date, input.time);
+  const title = buildBundleTitle(input.titleBase, input.date, input.time);
 
-  // esiste già?
-  const q = `title:"${title.replace(/"/g, '\\"')}"`;
-  const found = await adminFetchGQL<{ products: { edges: { node: any }[] } }>(Q_PRODUCT_BY_TITLE, { q });
-  const node = found.products?.edges?.[0]?.node;
-
-  if (node) {
-    // esistente: ritorna id + varianti mappate
-    const current: Partial<Record<TicketType, string>> = {};
-    for (const v of node.variants?.nodes ?? []) {
-      const name = (v.title || "").toLowerCase();
-      if (name.includes("unico")) current["unico"] = v.id;
-      if (name.includes("adulto")) current["adulto"] = v.id;
-      if (name.includes("bambino")) current["bambino"] = v.id;
-      if (name.includes("handicap")) current["handicap"] = v.id;
+  // 1) se già esiste, mappa le varianti per Title
+  const existing = await findProductByExactTitle(title);
+  if (existing) {
+    const current: Record<string, string | undefined> = {};
+    const edges = existing.variants?.edges || [];
+    for (const e of edges) {
+      const v = e.node;
+      const so = v.selectedOptions || [];
+      const t = (so.find((o: any) => o.name === "Title")?.value || v.title || "").toLowerCase();
+      if (t.includes("unico")) current["unico"] = v.id;
+      else if (t.includes("adulto")) current["adulto"] = v.id;
+      else if (t.includes("bambino")) current["bambino"] = v.id;
+      else if (t.includes("handicap")) current["handicap"] = v.id;
     }
-    return { productId: node.id, variants: current, created: false };
-  }
+    // se mancano varianti richieste, le aggiungo
+    const needed = variantNamesForMode(input.mode).filter((k) => !current[k]);
+    if (needed.length && !input.dryRun) {
+      const variants = needed.map((k) => ({
+        optionValues: [{ optionName: "Title", name: labelForVariant(k) }],
+      }));
+      const out = await adminFetchGQL<{
+        productVariantsBulkCreate: { userErrors: { message: string }[] };
+      }>(M_PRODUCT_VARIANTS_BULK_CREATE, {
+        productId: existing.id,
+        variants,
+        strategy: "REMOVE_STANDALONE_VARIANT",
+      });
+      const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
+      if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
-  if (dryRun) {
-    // simulazione: ID fittizi coerenti
-    const variants: Partial<Record<TicketType, string>> =
-      input.mode === "unico"
-        ? { unico: "gid://shopify/ProductVariant/DRYRUN_UNICO" }
-        : {
-            adulto: "gid://shopify/ProductVariant/DRYRUN_ADULTO",
-            bambino: "gid://shopify/ProductVariant/DRYRUN_BAMBINO",
-            handicap: "gid://shopify/ProductVariant/DRYRUN_HANDICAP",
-          };
+      // rileggi per ottenere gli ID aggiornati
+      const refreshed = await findProductByExactTitle(title);
+      const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
+        unico: undefined,
+        adulto: undefined,
+        bambino: undefined,
+        handicap: undefined,
+      };
+      for (const e of refreshed?.variants?.edges || []) {
+        const v = e.node;
+        const t = (v.selectedOptions?.[0]?.value || v.title || "").toLowerCase();
+        if (t.includes("unico")) ret.unico = v.id;
+        else if (t.includes("adulto")) ret.adulto = v.id;
+        else if (t.includes("bambino")) ret.bambino = v.id;
+        else if (t.includes("handicap")) ret.handicap = v.id;
+      }
+      return { productId: refreshed.id, variantMap: ret };
+    }
 
     return {
-      productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN",
-      variants,
-      created: true,
+      productId: existing.id,
+      variantMap: {
+        unico: current["unico"],
+        adulto: current["adulto"],
+        bambino: current["bambino"],
+        handicap: current["handicap"],
+      },
     };
   }
 
-  // crea prodotto ACTIVE
-  const created = await adminFetchGQL<{
-    productCreate: { product: any; userErrors: { field?: string[]; message: string }[] };
-  }>(M_PRODUCT_CREATE, {
-    input: {
-      title,
-      status: "ACTIVE",
-      templateSuffix: input.templateSuffix ?? undefined,
-      tags: input.tags?.join(", "),
-      bodyHtml: input.description ?? undefined,
-      // immagine: opzionale, gestibile a parte via Files
-    },
-  });
-
-  const errs = created.productCreate?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e) => e.message).join(" | "));
-  const productId = created.productCreate?.product?.id;
-  if (!productId) throw new Error("productCreate (bundle): productId mancante");
-
-  // crea le varianti necessarie
-  const variantsToCreate: { title: string }[] =
-    input.mode === "unico"
-      ? [{ title: variantNameFromTicketType("unico") }]
-      : [
-          { title: variantNameFromTicketType("adulto") },
-          { title: variantNameFromTicketType("bambino") },
-          { title: variantNameFromTicketType("handicap") },
-        ];
-
-  if (variantsToCreate.length) {
-    const bv = await adminFetchGQL<{
-      productVariantsBulkCreate: { userErrors: { field?: string[]; message: string }[] };
-    }>(M_PRODUCT_VARIANTS_BULK_CREATE, {
-      productId,
-      variants: variantsToCreate,
-    });
-    const verr = bv.productVariantsBulkCreate?.userErrors ?? [];
-    if (verr.length) throw new Error(verr.map((e) => e.message).join(" | "));
+  // 2) se dryRun, ritorno placeholder mappa
+  if (input.dryRun) {
+    const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
+      unico: "gid://shopify/ProductVariant/DRYRUN_UNICO",
+      adulto: "gid://shopify/ProductVariant/DRYRUN_ADULTO",
+      bambino: "gid://shopify/ProductVariant/DRYRUN_BAMBINO",
+      handicap: "gid://shopify/ProductVariant/DRYRUN_HANDICAP",
+    };
+    if (input.mode === "unico") {
+      ret.adulto = ret.bambino = ret.handicap = undefined;
+    }
+    return {
+      productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN",
+      variantMap: ret,
+    };
   }
 
-  // refetch per ottenere gli id varianti
-  const refreshed = await adminFetchGQL<{ products: { edges: { node: any }[] } }>(Q_PRODUCT_BY_TITLE, { q });
-  const refNode = refreshed.products?.edges?.[0]?.node;
-  const map: Partial<Record<TicketType, string>> = {};
-  for (const v of refNode?.variants?.nodes ?? []) {
-    const name = (v.title || "").toLowerCase();
-    if (name.includes("unico")) map["unico"] = v.id;
-    if (name.includes("adulto")) map["adulto"] = v.id;
-    if (name.includes("bambino")) map["bambino"] = v.id;
-    if (name.includes("handicap")) map["handicap"] = v.id;
-  }
-
-  return { productId, variants: map, created: true };
-}
-
-export async function setVariantPrices(params: {
-  variantId: string;
-  priceEuro: number;
-  dryRun?: boolean;
-}): Promise<{ ok: true }> {
-  const dryRun = params.dryRun ?? true;
-  if (dryRun) return { ok: true };
-
-  // Shopify attende un Decimal in stringa "0.00"
-  const priceStr = Number(params.priceEuro).toFixed(2);
-  const res = await adminFetchGQL<{
-    productVariantUpdate: { productVariant?: { id: string }; userErrors: { field?: string[]; message: string }[] };
-  }>(M_PRODUCT_VARIANT_UPDATE, {
-    input: { id: params.variantId, price: priceStr },
+  // 3) crea prodotto (draft). La pubblicazione canale non è gestita qui (manca scope write_publications).
+  const product = await createProductDraft({
+    title,
+    templateSuffix: input.templateSuffix,
+    tags: Array.from(new Set([...(input.tags || []), "Bundle", input.eventHandle].filter(Boolean))),
+    descriptionHtml: input.description || undefined,
   });
-  const errs = res.productVariantUpdate?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e) => e.message).join(" | "));
-  return { ok: true };
-}
 
-export async function upsertBundleComponents(params: {
-  parentVariantId: string;               // variante del bundle (es. Adulto)
-  childVariantId: string;                // variante del seat
-  qty: number;                           // 1 oppure 2 per Handicap
-  dryRun?: boolean;
-}): Promise<{ ok: true }> {
-  const dryRun = params.dryRun ?? true;
-  if (dryRun) return { ok: true };
+  // 4) crea varianti richieste
+  const needed = variantNamesForMode(input.mode);
+  const variants = needed.map((k) => ({
+    optionValues: [{ optionName: "Title", name: labelForVariant(k) }],
+  }));
 
-  // Nota: l’API accetta operazioni batch; inviamo un'operazione singola per semplicità.
-  const op = {
-    type: "UPSERT" as const,
-    parentId: params.parentVariantId,
-    relatesTo: [
-      {
-        id: params.childVariantId,
-        quantity: params.qty,
-        relationType: "HAS_COMPONENT",
-      },
-    ],
+  const out = await adminFetchGQL<{
+    productVariantsBulkCreate: { userErrors: { message: string }[] };
+  }>(M_PRODUCT_VARIANTS_BULK_CREATE, {
+    productId: product.id,
+    variants,
+    strategy: "REMOVE_STANDALONE_VARIANT",
+  });
+  const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
+  if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
+
+  // 5) rileggi per mappa ID
+  const refreshed = await findProductByExactTitle(title);
+  const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
+    unico: undefined,
+    adulto: undefined,
+    bambino: undefined,
+    handicap: undefined,
   };
+  for (const e of refreshed?.variants?.edges || []) {
+    const v = e.node;
+    const t = (v.selectedOptions?.[0]?.value || v.title || "").toLowerCase();
+    if (t.includes("unico")) ret.unico = v.id;
+    else if (t.includes("adulto")) ret.adulto = v.id;
+    else if (t.includes("bambino")) ret.bambino = v.id;
+    else if (t.includes("handicap")) ret.handicap = v.id;
+  }
+  return { productId: refreshed.id, variantMap: ret };
+}
+
+/**
+ * Aggiorna il prezzo di 1..n varianti (EURO -> cent effettivi lato Shopify).
+ * Accetta mappa { variantId: prezzoEuro }.
+ */
+export async function setVariantPrices(mapEuro: Record<string, number | undefined>) {
+  const variantsInput = Object.entries(mapEuro)
+    .filter(([, eur]) => typeof eur === "number")
+    .map(([id, eur]) => ({
+      id,
+      price: (eur as number).toString(), // Admin GraphQL accetta string o decimal
+    }));
+
+  if (!variantsInput.length) return;
 
   const res = await adminFetchGQL<{
-    productVariantRelationshipBulkUpdate: { userErrors: { field?: string[]; message: string }[]; job?: { id: string } };
-  }>(M_PRODUCT_VARIANT_REL_BULK_UPDATE, { operations: [op] });
+    productVariantsBulkUpdate: { userErrors: { field?: string[]; message: string }[] };
+  }>(M_PRODUCT_VARIANTS_BULK_UPDATE, { variants: variantsInput });
 
-  const errs = (res as any).productVariantRelationshipBulkUpdate?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
-  return { ok: true };
+  const errs = (res as any).productVariantsBulkUpdate?.userErrors || [];
+  if (errs.length) throw new Error(`variantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
+}
+
+/**
+ * Collega la variante "bundle" (parentVariantId) alla variante "seat" (child) con qty desiderata.
+ * Per Handicap usare qty=2.
+ */
+export async function upsertBundleComponents(params: {
+  parentVariantId: string;
+  childVariantId: string;
+  qty: number;
+}) {
+  const input = [
+    {
+      parentProductVariantId: params.parentVariantId,
+      productVariantRelationshipsToCreate: [
+        {
+          id: params.childVariantId,
+          quantity: params.qty,
+        },
+      ],
+    },
+  ];
+
+  const res = await adminFetchGQL<{
+    productVariantRelationshipBulkUpdate: { userErrors: { code?: string; message: string }[] };
+  }>(M_VARIANT_REL_BULK_UPDATE, { input });
+
+  const errs = (res as any).productVariantRelationshipBulkUpdate?.userErrors || [];
+  if (errs.length) throw new Error(`bundle components error: ${errs.map((e: any) => e.message).join(" | ")}`);
 }
