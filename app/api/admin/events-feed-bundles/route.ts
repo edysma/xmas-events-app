@@ -2,97 +2,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminFetchGQL } from "@/lib/shopify-admin";
 
-function extractFromTitle(title: string, handle: string): { date: string; time: string } | null {
-  // Titolo atteso: "<handle> — YYYY-MM-DD HH:mm"
-  const rx = new RegExp(`^${handle}\\s+—\\s+(\\d{4}-\\d{2}-\\d{2})\\s+(\\d{2}:\\d{2})$`, "i");
-  const m = title.match(rx);
-  if (!m) return null;
-  return { date: m[1], time: m[2] };
+/**
+ * Estrae data/ora dal titolo prodotto.
+ * Supporta entrambe le forme:
+ *   - "… — YYYY-MM-DD HH:mm"
+ *   - "… — DD/MM/YYYY HH:mm"
+ * Accetta sia EN DASH "—" che trattino "-".
+ */
+function parseTitleForDateTime(title: string): { date: string; time: string } | null {
+  const t = (title || "").trim();
+
+  // ISO: YYYY-MM-DD HH:mm
+  const mIso = t.match(/[—-]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s*$/);
+  if (mIso) return { date: mIso[1], time: mIso[2] };
+
+  // ITA: DD/MM/YYYY HH:mm
+  const mIt = t.match(/[—-]\s*(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})\s*$/);
+  if (mIt) return { date: `${mIt[3]}-${mIt[2]}-${mIt[1]}`, time: mIt[4] };
+
+  return null;
 }
-
-async function fallbackEventsFromShopify(eventHandle: string, month: string) {
-  const monthPrefix = `${month}-`; // es. "2025-12-"
-  // Cerchiamo prodotti con tag: Bundle + eventHandle e titolo che inizia con "<handle> — YYYY-MM-"
-  const q = `tag:Bundle tag:${eventHandle} "${eventHandle} — ${monthPrefix}"`;
-
-  const Q = /* GraphQL */ `
-    query ProductsByQuery($q: String!, $after: String) {
-      products(first: 100, query: $q, after: $after) {
-        edges {
-          cursor
-          node {
-            id
-            title
-            variants(first: 10) {
-              edges { node { id title } }
-            }
-          }
-        }
-        pageInfo { hasNextPage }
-      }
-    }
-  `;
-
-  type VariantEdge = { node: { id: string; title: string } };
-  type GqlResp = {
-    products: {
-      edges: { cursor: string; node: { id: string; title: string; variants?: { edges: VariantEdge[] } } }[];
-      pageInfo: { hasNextPage: boolean };
-    };
-  };
-
-  const products: { id: string; title: string; variants: { id: string; title: string }[] }[] = [];
-  let after: string | null = null;
-
-  while (true) {
-    const resp: GqlResp = await adminFetchGQL<GqlResp>(Q, { q, after });
-    for (const e of resp.products.edges) {
-      const node = e.node;
-      products.push({
-        id: node.id,
-        title: node.title,
-        variants: (node.variants?.edges || []).map(v => ({ id: v.node.id, title: v.node.title })),
-      });
-    }
-    if (!resp.products.pageInfo.hasNextPage) break;
-    after = resp.products.edges[resp.products.edges.length - 1].cursor;
-  }
-
-  // Raggruppa per data -> slots[]
-  const byDate: Record<string, any[]> = {};
-  const lower = (s: string) => s.toLowerCase();
-
-  for (const p of products) {
-    const dt = extractFromTitle(p.title, eventHandle);
-    if (!dt) continue;
-
-    const map = {
-      unico:    p.variants.find(v => lower(v.title).includes("unico"))?.id,
-      adulto:   p.variants.find(v => lower(v.title).includes("adulto"))?.id,
-      bambino:  p.variants.find(v => lower(v.title).includes("bambino"))?.id,
-      handicap: p.variants.find(v => lower(v.title).includes("handicap"))?.id,
-    };
-
-    const slot: any = { time: dt.time };
-    if (map.unico) {
-      slot.bundleVariantId_single = map.unico;
-    } else {
-      if (map.adulto)   slot.bundleVariantId_adulto   = map.adulto;
-      if (map.bambino)  slot.bundleVariantId_bambino  = map.bambino;
-      if (map.handicap) slot.bundleVariantId_handicap = map.handicap;
-    }
-
-    byDate[dt.date] = byDate[dt.date] || [];
-    byDate[dt.date].push(slot);
-  }
-
-  const dates = Object.keys(byDate).sort();
-  return dates.map(d => ({
-    date: d,
-    slots: byDate[d].sort((a, b) => a.time.localeCompare(b.time)),
-  }));
-}
-
 
 const TZ = "Europe/Rome";
 
@@ -119,13 +48,6 @@ function isInMonth(date: string, month: string) {
   // month = "YYYY-MM"
   return date.startsWith(month + "-");
 }
-function parseTitleForDateTime(title: string): { date: string; time: string } | null {
-  // Titolo generato: `${base} — YYYY-MM-DD HH:mm`
-  // Accettiamo anche trattino normale.
-  const m = title.match(/—\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})$/) || title.match(/-\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})$/);
-  if (!m) return null;
-  return { date: m[1], time: m[2] };
-}
 
 async function fetchPublicFeed(baseUrl: string, month: string, collection: string) {
   const url = `${baseUrl}/api/events-feed?month=${encodeURIComponent(month)}&collection=${encodeURIComponent(collection)}`;
@@ -144,9 +66,7 @@ const Q_PRODUCTS_BY_QUERY = /* GraphQL */ `
           title
           tags
           variants(first: 20) {
-            edges {
-              node { id title }
-            }
+            edges { node { id title } }
           }
         }
       }
@@ -194,46 +114,39 @@ export async function GET(req: NextRequest) {
     try {
       const upstream = await fetchPublicFeed(base, month, eventHandle);
       if (Array.isArray(upstream?.events) && upstream.events.length > 0) {
-        // Arricchimento rapido: restituiamo lo stesso formato, senza toccare il feed pubblico.
-        // Qui potresti “fondere” gli ID bundle per slot se necessario.
-        // Per ora, se il feed pubblico c'è, ritorniamo “events” così com’è.
         return NextResponse.json({ ok: true, month, eventHandle, events: upstream.events }, { status: 200 });
       }
-    } catch (e: any) {
-      // Se 404 o vuoto, prosegui col fallback.
+    } catch {
+      // ignora: useremo il fallback
     }
 
-    // 2) Fallback: leggi i Bundle da Shopify (tagged) e ricava calendario
-    // Query di ricerca:
-    // - tag: <eventHandle>
-    // - tag: Bundle (i nostri biglietti)
-    // - status:active   (i prodotti visibili)
-    // NB: filtreremo lato codice per data del mese richiesto.
+    // 2) Fallback: cerca i Bundle direttamente in Shopify (prodotti attivi con i tag corretti)
     const q = `tag:${eventHandle} AND tag:Bundle AND status:active`;
+    type GqlResp = {
+      products: {
+        edges: { cursor: string; node: { id: string; title: string; variants?: { edges: { node: { id: string; title: string } }[] } } }[];
+        pageInfo: { hasNextPage: boolean };
+      };
+    };
+
     let after: string | null = null;
     const products: Array<{ id: string; title: string; variants: Array<{ id: string; title: string }> }> = [];
 
     while (true) {
-  const resp: {
-    products: {
-      edges: { cursor: string; node: { id: string; title: string; variants?: { edges: { node: { id: string; title: string } }[] } } }[];
-      pageInfo: { hasNextPage: boolean };
-    };
-  } = await adminFetchGQL(Q_PRODUCTS_BY_QUERY, { q, after });
+      const resp: GqlResp = await adminFetchGQL<GqlResp>(Q_PRODUCTS_BY_QUERY, { q, after });
+      for (const e of resp.products.edges) {
+        const node = e.node;
+        products.push({
+          id: node.id,
+          title: node.title,
+          variants: (node.variants?.edges || []).map((x) => ({ id: x.node.id, title: x.node.title })),
+        });
+      }
+      if (!resp.products.pageInfo.hasNextPage) break;
+      after = resp.products.edges[resp.products.edges.length - 1].cursor;
+    }
 
-  for (const e of resp.products.edges) {
-    const node = e.node;
-    products.push({
-      id: node.id,
-      title: node.title,
-      variants: (node.variants?.edges || []).map((x) => ({ id: x.node.id, title: x.node.title })),
-    });
-  }
-  if (!resp.products.pageInfo.hasNextPage) break;
-  after = resp.products.edges[resp.products.edges.length - 1].cursor;
-}
-
-    // 3) Costruisci giorni/slot dal titolo prodotto
+    // 3) Costruisci giorni/slot leggendo data/ora dal titolo
     type Slot = {
       time: string;
       day_type: "weekday" | "friday" | "saturday" | "sunday" | "holiday";
@@ -257,8 +170,8 @@ export async function GET(req: NextRequest) {
       if (mode === "unico") {
         if (map.unico) slot.bundleVariantId_single = map.unico;
       } else {
-        if (map.adulto) slot.bundleVariantId_adulto = map.adulto;
-        if (map.bambino) slot.bundleVariantId_bambino = map.bambino;
+        if (map.adulto)   slot.bundleVariantId_adulto   = map.adulto;
+        if (map.bambino)  slot.bundleVariantId_bambino  = map.bambino;
         if (map.handicap) slot.bundleVariantId_handicap = map.handicap;
       }
 
