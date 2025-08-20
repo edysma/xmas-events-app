@@ -47,8 +47,18 @@ function weekdayRome(date: string): number {
 
 function weekdayKey(date: string): "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun" {
   const w = weekdayRome(date);
-  return (["", "mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const)[w]!;
+  switch (w) {
+    case 1: return "mon";
+    case 2: return "tue";
+    case 3: return "wed";
+    case 4: return "thu";
+    case 5: return "fri";
+    case 6: return "sat";
+    case 7: return "sun";
+    default: return "mon"; // fallback sicuro
+  }
 }
+
 
 function dayTypeOf(
   date: string,
