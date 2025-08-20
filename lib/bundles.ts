@@ -227,8 +227,8 @@ export async function ensureInventory(input: EnsureInventoryInput): Promise<{ ok
 
   // 2) inventorySetQuantities — payload 2024-07+ (name/reason/quantities)
   const gqlInput = {
-    name: "AVAILABLE",              // enum InventoryQuantityName
-    reason: "CORRECTION",           // enum InventoryAdjustmentReason
+    name: "available",              // enum InventoryQuantityName
+    reason: "correction",           // enum InventoryAdjustmentReason
     ignoreCompareQuantity: true,    // evitiamo CAS
     referenceDocumentUri: `gid://sinflora-xmas/Generate/${Date.now()}`,
     quantities: [
