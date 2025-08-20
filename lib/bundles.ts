@@ -354,4 +354,48 @@ export async function setVariantPrices(params: {
   priceEuro: number;
   dryRun?: boolean;
 }): Promise<{ ok: true }> {
-  const dryRun = params.dryRun ?? t
+  const dryRun = params.dryRun ?? true;
+  if (dryRun) return { ok: true };
+
+  const priceStr = Number(params.priceEuro).toFixed(2);
+  const res = await adminFetchGQL<{
+    productVariantUpdate: { productVariant?: { id: string }; userErrors: { field?: string[]; message: string }[] };
+  }>(M_PRODUCT_VARIANT_UPDATE, {
+    input: { id: params.variantId, price: priceStr },
+  });
+  const errs = res.productVariantUpdate?.userErrors ?? [];
+  if (errs.length) throw new Error(errs.map(e => e.message).join(" | "));
+  return { ok: true };
+}
+
+export async function upsertBundleComponents(params: {
+  parentVariantId: string;               // variante del bundle (es. Adulto)
+  childVariantId: string;                // variante del seat
+  qty: number;                           // 1 oppure 2 per Handicap
+  dryRun?: boolean;
+}): Promise<{ ok: true }> {
+  const dryRun = params.dryRun ?? true;
+  if (dryRun) return { ok: true };
+
+  // Nota: l’API accetta operazioni batch, qui inviamo un’operazione singola per semplicità.
+  const op = {
+    type: "UPSERT" as const,
+    parentId: params.parentVariantId,
+    relatesTo: [
+      {
+        id: params.childVariantId,
+        quantity: params.qty,
+        relationType: "HAS_COMPONENT"
+      }
+    ]
+  };
+
+  const res = await adminFetchGQL<{
+    productVariantRelationshipBulkUpdate: { userErrors: { field?: string[]; message: string }[]; job?: { id: string } };
+  }>(M_PRODUCT_VARIANT_REL_BULK_UPDATE, {
+    operations: [op],
+  });
+  const errs = (res as any).productVariantRelationshipBulkUpdate?.userErrors ?? [];
+  if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
+  return { ok: true };
+}
