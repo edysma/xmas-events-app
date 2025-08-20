@@ -45,7 +45,7 @@ async function fallbackEventsFromShopify(eventHandle: string, month: string) {
   let after: string | null = null;
 
   while (true) {
-    const resp = await adminFetchGQL<GqlResp>(Q, { q, after });
+    const resp: GqlResp = await adminFetchGQL<GqlResp>(Q, { q, after });
     for (const e of resp.products.edges) {
       const node = e.node;
       products.push({
