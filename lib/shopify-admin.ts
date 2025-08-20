@@ -87,5 +87,19 @@ export async function getDefaultLocationId(): Promise<string> {
   if (!loc) throw new Error("Nessuna location trovata su Shopify");
   return loc; // es: gid://shopify/Location/123456789
 }
-// compat: vecchio nome usato altrove
-export { adminFetchGQL as shopifyAdminGraphQL };
+// compat: supporta sia la firma nuova (query, variables)
+// sia la vecchia (shop, token, query, variables)
+export async function shopifyAdminGraphQL(
+  a: any,
+  b?: any,
+  c?: any,
+  d?: any
+) {
+  // vecchia firma: (shop, token, query, variables)
+  if (typeof c === "string") {
+    return adminFetchGQL(c, d);
+  }
+  // nuova firma: (query, variables)
+  return adminFetchGQL(a, b);
+}
+
