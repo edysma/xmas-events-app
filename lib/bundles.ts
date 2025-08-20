@@ -133,24 +133,25 @@ const M_VARIANT_REL_BULK_UPDATE = /* GraphQL */ `
   }
 `;
 
-// Inventario: set assoluto "available" con reason "correction"
+// Inventario: payload corretto (input = InventorySetQuantitiesInput!)
 const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
-  mutation SetQty($input: [InventorySetQuantityInput!]!) {
+  mutation InvSet($input: InventorySetQuantitiesInput!) {
     inventorySetQuantities(input: $input) {
       inventoryAdjustmentGroup {
+        createdAt
         reason
+        referenceDocumentUri
         changes {
           name
           delta
           quantityAfterChange
-          item { id }
-          location { id }
         }
       }
-      userErrors { field message }
+      userErrors { field message code }
     }
   }
 `;
+
 
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string) {
@@ -246,11 +247,11 @@ export async function ensureInventory(opts: {
   variantId: string;
   locationId?: string;
   quantity: number;
-  dryRun?: boolean; // <— aggiunto per compat con route.ts
+  dryRun?: boolean;
 }) {
   const locationId = opts.locationId || (await getDefaultLocationId());
 
-  // Dry-run: non scrive nulla, ma torna subito
+  // Dry-run: non scrive, ma torna anteprima utile
   if (opts.dryRun) {
     return {
       ok: true,
@@ -262,10 +263,7 @@ export async function ensureInventory(opts: {
   // Per inventorySetQuantities serve l'inventoryItemId
   const Q_VAR = /* GraphQL */ `
     query VariantInv($id: ID!) {
-      productVariant(id: $id) {
-        id
-        inventoryItem { id }
-      }
+      productVariant(id: $id) { id inventoryItem { id } }
     }
   `;
   const varData = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } }>(
@@ -275,26 +273,38 @@ export async function ensureInventory(opts: {
   const inventoryItemId = varData.productVariant?.inventoryItem?.id;
   if (!inventoryItemId) throw new Error("inventoryItem non trovato per la variante");
 
-  const input = [
-    {
-      inventoryItemId,
-      locationId,
-      name: "available",
-      reason: "correction",
-      quantity: opts.quantity,
-      ignoreCompareQuantity: true,
-    },
-  ];
+  // Input OGGETTO (InventorySetQuantitiesInput), non array
+  const gqlInput = {
+    name: "available" as const,
+    reason: "correction" as const,
+    ignoreCompareQuantity: true,
+    referenceDocumentUri: `gid://sinflora-xmas/Generate/${Date.now()}`,
+    quantities: [
+      {
+        inventoryItemId,
+        locationId,
+        quantity: opts.quantity,
+        compareQuantity: null,
+      },
+    ],
+  };
 
   const res = await adminFetchGQL<{
     inventorySetQuantities: {
-      userErrors: { field?: string[]; message: string }[];
+      inventoryAdjustmentGroup?: {
+        createdAt: string;
+        reason: string;
+        referenceDocumentUri?: string | null;
+        changes: { name: string; delta: number; quantityAfterChange: number | null }[];
+      } | null;
+      userErrors: { field?: string[] | null; message: string; code?: string | null }[];
     };
-  }>(M_INVENTORY_SET_QUANTITIES, { input });
+  }>(M_INVENTORY_SET_QUANTITIES, { input: gqlInput });
 
-  const errs = (res as any).inventorySetQuantities?.userErrors || [];
-  if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map((e: any) => e.message).join(" | ")}`);
+  const errs = res.inventorySetQuantities?.userErrors || [];
+  if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map(e => e.message).join(" | ")}`);
 }
+
 
 
 /**
