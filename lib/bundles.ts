@@ -90,7 +90,7 @@ const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ `
 `;
 
 const M_PRODUCT_CREATE = /* GraphQL */ `
-  mutation CreateProduct($input: ProductCreateInput!) {
+  mutation CreateProduct($input: ProductInput!) {
     productCreate(input: $input) {
       product { id title status templateSuffix variants(first: 5) { edges { node { id title } } } }
       userErrors { field message }
