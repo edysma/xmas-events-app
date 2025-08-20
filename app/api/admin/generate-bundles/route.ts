@@ -126,7 +126,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
 
-    let body: GenerateInput & { dryRun?: boolean; templateSuffix?: string; tags?: string[]; description?: string; imageUrl?: string };
+    let body: GenerateInput & {
+      dryRun?: boolean;
+      templateSuffix?: string;
+      tags?: string[];
+      description?: string;
+      imageUrl?: string;
+    };
     try {
       body = await req.json();
     } catch {
@@ -140,7 +146,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const input = body as ManualInput & { dryRun?: boolean; templateSuffix?: string; tags?: string[]; description?: string; imageUrl?: string };
+    const input = body as ManualInput & {
+      dryRun?: boolean;
+      templateSuffix?: string;
+      tags?: string[];
+      description?: string;
+      imageUrl?: string;
+    };
     const dryRun = input.dryRun !== false; // default true
 
     const templateSuffix = input.templateSuffix;
@@ -155,6 +167,7 @@ export async function POST(req: NextRequest) {
     const preview: PreviewItem[] = [];
     const warningsGlobal: string[] = [];
 
+    // Nota: per ora i contatori "created" rimangono 0 (riempiremo in seguito se serve)
     let seatsCreated = 0;
     let bundlesCreated = 0;
     let variantsCreated = 0;
@@ -186,6 +199,7 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
+        // ---------- Seat Unit ----------
         const seat = await ensureSeatUnit({
           date,
           time,
@@ -196,6 +210,7 @@ export async function POST(req: NextRequest) {
           dryRun,
         });
 
+        // stock iniziale
         await ensureInventory({
           variantId: seat.variantId,
           locationId: input.locationId,
@@ -203,6 +218,7 @@ export async function POST(req: NextRequest) {
           dryRun,
         });
 
+        // ---------- Bundle ----------
         const bundle = await ensureBundle({
           eventHandle: input.eventHandle,
           date,
@@ -217,48 +233,51 @@ export async function POST(req: NextRequest) {
           dryRun,
         });
 
-        const compOps: [keyof typeof bundle.variants, number][] =
-          mode === "unico" ? [["unico", 1]] : [["adulto", 1], ["bambino", 1], ["handicap", 2]];
-
-        for (const [k, qty] of compOps) {
-          const parentVariantId = bundle.variants[k];
-          if (!parentVariantId) continue;
-          await upsertBundleComponents({
-            parentVariantId,
-            childVariantId: seat.variantId,
-            qty,
-            dryRun,
-          });
-        }
-
-        if (mode === "unico" && typeof tier.unico === "number" && bundle.variants.unico) {
-          await setVariantPrices({ variantId: bundle.variants.unico, priceEuro: tier.unico, dryRun });
-        }
-        if (mode === "triple") {
-          if (typeof tier.adulto === "number" && bundle.variants.adulto) {
-            await setVariantPrices({ variantId: bundle.variants.adulto, priceEuro: tier.adulto, dryRun });
-          }
-          if (typeof tier.bambino === "number" && bundle.variants.bambino) {
-            await setVariantPrices({ variantId: bundle.variants.bambino, priceEuro: tier.bambino, dryRun });
-          }
-          if (typeof tier.handicap === "number" && bundle.variants.handicap) {
-            await setVariantPrices({ variantId: bundle.variants.handicap, priceEuro: tier.handicap, dryRun });
-          }
-        }
+        // ---------- Componenti (collega variante seat) ----------
+        // qty 1 per tutte, tranne handicap = 2
+        const compOps: (["unico" | "adulto" | "bambino" | "handicap", number])[] =
+          mode === "unico"
+            ? [["unico", 1]]
+            : [["adulto", 1], ["bambino", 1], ["handicap", 2]];
 
         if (!dryRun) {
-          if (seat.created) seatsCreated += 1;
-          if (bundle.created) bundlesCreated += 1;
+          for (const [k, qty] of compOps) {
+            const parentVariantId = bundle.variantMap[k];
+            if (!parentVariantId) continue;
+            await upsertBundleComponents({
+              parentVariantId,
+              childVariantId: seat.variantId,
+              qty,
+            });
+          }
         }
 
+        // ---------- Prezzi ----------
+        if (!dryRun) {
+          const pricesToSet: Record<string, number | undefined> = {};
+          if (mode === "unico") {
+            const vid = bundle.variantMap.unico;
+            if (vid && typeof tier.unico === "number") pricesToSet[vid] = tier.unico;
+          } else {
+            const { adulto, bambino, handicap } = bundle.variantMap;
+            if (adulto && typeof tier.adulto === "number") pricesToSet[adulto] = tier.adulto;
+            if (bambino && typeof tier.bambino === "number") pricesToSet[bambino] = tier.bambino;
+            if (handicap && typeof tier.handicap === "number") pricesToSet[handicap] = tier.handicap;
+          }
+          if (Object.keys(pricesToSet).length) {
+            await setVariantPrices(pricesToSet);
+          }
+        }
+
+        // ---------- Preview ----------
         if (preview.length < 10) {
           item.seatProductId = seat.productId;
           item.bundleProductId = bundle.productId;
           item.variantMap = {
-            unico: bundle.variants.unico,
-            adulto: bundle.variants.adulto,
-            bambino: bundle.variants.bambino,
-            handicap: bundle.variants.handicap,
+            unico: bundle.variantMap.unico,
+            adulto: bundle.variantMap.adulto,
+            bambino: bundle.variantMap.bambino,
+            handicap: bundle.variantMap.handicap,
           };
           preview.push(item);
         }
@@ -273,13 +292,8 @@ export async function POST(req: NextRequest) {
     };
     return NextResponse.json(resp, { status: 200 });
   } catch (err: any) {
-    // Restituiamo SEMPRE JSON in caso di eccezione
     return NextResponse.json(
-      {
-        ok: false,
-        error: "internal_error",
-        detail: String(err?.message || err),
-      },
+      { ok: false, error: "internal_error", detail: String(err?.message || err) },
       { status: 500 }
     );
   }
