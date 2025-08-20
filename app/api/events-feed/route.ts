@@ -8,7 +8,6 @@ export const dynamic = "force-dynamic";
 
 async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<T> {
   const domain = process.env.SHOPIFY_STORE_DOMAIN!;
-  // ✅ usa la stessa env usata nella /api/sf-health
   const token = process.env.SHOPIFY_STOREFRONT_ACCESS_TOKEN!;
 
   if (!domain || !token) throw new Error("Missing Storefront envs");
@@ -139,6 +138,19 @@ function extractVariantMap(variants: Array<{ title: string; id: string }>) {
   return { mode, map: out };
 }
 
+/* ---------------- CORS helper ---------------- */
+
+function withCORS(res: NextResponse) {
+  res.headers.set("Access-Control-Allow-Origin", "*");
+  res.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.headers.set("Access-Control-Allow-Headers", "*");
+  return res;
+}
+
+export async function OPTIONS() {
+  return withCORS(new NextResponse(null, { status: 204 }));
+}
+
 /* ---------------- Route pubblica ---------------- */
 
 export async function GET(req: NextRequest) {
@@ -148,10 +160,10 @@ export async function GET(req: NextRequest) {
     const collection = searchParams.get("collection") || "";
 
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-      return NextResponse.json({ ok: false, error: "invalid_month" }, { status: 400 });
+      return withCORS(NextResponse.json({ ok: false, error: "invalid_month" }, { status: 400 }));
     }
     if (!collection) {
-      return NextResponse.json({ ok: false, error: "missing_collection" }, { status: 400 });
+      return withCORS(NextResponse.json({ ok: false, error: "missing_collection" }, { status: 400 }));
     }
 
     // 1) Carico i prodotti della collezione dal canale pubblico (Storefront)
@@ -212,8 +224,8 @@ export async function GET(req: NextRequest) {
       if (mode === "unico") {
         if (map.unico) slot.bundleVariantId_single = map.unico;
       } else {
-        if (map.adulto) slot.bundleVariantId_adulto = map.adulto;
-        if (map.bambino) slot.bundleVariantId_bambino = map.bambino;
+        if (map.adulto)   slot.bundleVariantId_adulto = map.adulto;
+        if (map.bambino)  slot.bundleVariantId_bambino = map.bambino;
         if (map.handicap) slot.bundleVariantId_handicap = map.handicap;
       }
 
@@ -225,11 +237,10 @@ export async function GET(req: NextRequest) {
       .sort()
       .map((date) => ({ date, slots: byDate[date].sort((a, b) => a.time.localeCompare(b.time)) }));
 
-    return NextResponse.json({ month, events }, { status: 200 });
+    return withCORS(NextResponse.json({ month, events }, { status: 200 }));
   } catch (err: any) {
-    return NextResponse.json(
-      { month: "", events: [], error: String(err?.message || err) },
-      { status: 500 }
+    return withCORS(
+      NextResponse.json({ month: "", events: [], error: String(err?.message || err) }, { status: 500 })
     );
   }
 }
