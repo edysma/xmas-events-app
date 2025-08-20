@@ -63,17 +63,23 @@ export async function adminFetchGQL<T = any>(
   return json.data;
 }
 
+function toGid(kind: "Location", id: string): string {
+  if (id.startsWith(`gid://shopify/${kind}/`)) return id;
+  if (/^\d+$/.test(id)) return `gid://shopify/${kind}/${id}`;
+  return id;
+}
+
 export async function getDefaultLocationId(): Promise<string> {
-  if (process.env.DEFAULT_LOCATION_ID) return process.env.DEFAULT_LOCATION_ID;
+  const fromEnv = process.env.DEFAULT_LOCATION_ID;
+  if (fromEnv) {
+    return toGid("Location", fromEnv);
+  }
 
   const q = /* GraphQL */ `
     query GetOneLocation {
       locations(first: 1) {
         edges {
-          node {
-            id
-            name
-          }
+          node { id name }
         }
       }
     }
@@ -87,19 +93,23 @@ export async function getDefaultLocationId(): Promise<string> {
   if (!loc) throw new Error("Nessuna location trovata su Shopify");
   return loc; // es: gid://shopify/Location/123456789
 }
-// compat: supporta sia la firma nuova (query, variables)
-// sia la vecchia (shop, token, query, variables)
+
+// ---------------------------------------------------------------------------
+// Compatibilità con vecchio codice:
+// Alcuni punti del progetto importano ancora `shopifyAdminGraphQL` e/o
+// usano la vecchia firma (shop, token, query, variables).
+// Questo wrapper reindirizza tutto a `adminFetchGQL(query, variables)`.
+// ---------------------------------------------------------------------------
 export async function shopifyAdminGraphQL(
   a: any,
   b?: any,
   c?: any,
   d?: any
 ) {
-  // vecchia firma: (shop, token, query, variables)
+  // Vecchia firma: (shop, token, query, variables)
   if (typeof c === "string") {
     return adminFetchGQL(c, d);
   }
-  // nuova firma: (query, variables)
+  // Nuova firma: (query, variables)
   return adminFetchGQL(a, b);
 }
-
