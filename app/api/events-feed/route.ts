@@ -1,16 +1,23 @@
 // app/api/events-feed/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
+// Evita caching aggressivo su Vercel/Next per questa rotta pubblica
+export const dynamic = "force-dynamic";
+
 /* ---------------- Storefront GQL client (pubblico) ---------------- */
 
 async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<T> {
   const domain = process.env.SHOPIFY_STORE_DOMAIN!;
-  const token = process.env.SHOPIFY_STOREFRONT_TOKEN!;
+  // ✅ usa la stessa env usata nella /api/sf-health
+  const token = process.env.SHOPIFY_STOREFRONT_ACCESS_TOKEN!;
+
+  if (!domain || !token) throw new Error("Missing Storefront envs");
+
   const res = await fetch(`https://${domain}/api/2024-07/graphql.json`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-shopify-storefront-access-token": token,
+      "X-Shopify-Storefront-Access-Token": token,
     },
     body: JSON.stringify({ query, variables }),
     cache: "no-store",
@@ -94,7 +101,7 @@ const Q_COLLECTION_PRODUCTS = /* GraphQL */ `
   }
 `;
 
-/* Esplicito i tipi per evitare l’errore TS sul const data */
+/* Esplicito i tipi per evitare errori TS */
 type SfCollectionProductsResp = {
   collection: {
     products: {
@@ -127,11 +134,8 @@ function extractVariantMap(variants: Array<{ title: string; id: string }>) {
     else if (t.includes("bambino")) out.bambino = v.id;
     else if (t.includes("handicap")) out.handicap = v.id;
   }
-  const mode: "unico" | "triple" | null = out.unico
-    ? "unico"
-    : out.adulto || out.bambino || out.handicap
-    ? "triple"
-    : null;
+  const mode: "unico" | "triple" | null =
+    out.unico ? "unico" : out.adulto || out.bambino || out.handicap ? "triple" : null;
   return { mode, map: out };
 }
 
