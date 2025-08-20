@@ -19,8 +19,10 @@ if (!SHOP_DOMAIN) {
   );
 }
 
-const GQL_URL = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`;
+const ADMIN_BASE = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}`;
+const GQL_URL = `${ADMIN_BASE}/graphql.json`;
 
+// -------------------- Core GQL --------------------
 type GqlResponse<T> = {
   data?: T;
   errors?: { message: string; locations?: any; path?: string[] }[];
@@ -63,28 +65,54 @@ export async function adminFetchGQL<T = any>(
   return json.data;
 }
 
+// -------------------- Core REST (per Themes) --------------------
+export async function adminFetchREST<T = any>(
+  path: string,
+  init?: RequestInit & { searchParams?: Record<string, string> }
+): Promise<T> {
+  const url = new URL(`${ADMIN_BASE}${path}`);
+  const sp = init?.searchParams;
+  if (sp) {
+    for (const [k, v] of Object.entries(sp)) url.searchParams.set(k, v);
+  }
+
+  const res = await fetch(url.toString(), {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": ADMIN_ACCESS_TOKEN,
+      ...(init?.headers || {}),
+    },
+  });
+
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Shopify REST ${res.status}: ${text}`);
+  try {
+    return text ? (JSON.parse(text) as T) : ({} as T);
+  } catch {
+    return text as unknown as T;
+  }
+}
+
+// -------------------- Utils --------------------
 function toGid(kind: "Location", id: string): string {
   if (id.startsWith(`gid://shopify/${kind}/`)) return id;
   if (/^\d+$/.test(id)) return `gid://shopify/${kind}/${id}`;
   return id;
 }
 
+// -------------------- Locations --------------------
 export async function getDefaultLocationId(): Promise<string> {
   const fromEnv = process.env.DEFAULT_LOCATION_ID;
-  if (fromEnv) {
-    return toGid("Location", fromEnv);
-  }
+  if (fromEnv) return toGid("Location", fromEnv);
 
   const q = /* GraphQL */ `
     query GetOneLocation {
       locations(first: 1) {
-        edges {
-          node { id name }
-        }
+        edges { node { id name } }
       }
     }
   `;
-
   const data = await adminFetchGQL<{
     locations: { edges: { node: { id: string; name: string } }[] };
   }>(q);
@@ -94,12 +122,137 @@ export async function getDefaultLocationId(): Promise<string> {
   return loc; // es: gid://shopify/Location/123456789
 }
 
-// ---------------------------------------------------------------------------
-// Compatibilità con vecchio codice:
-// Alcuni punti del progetto importano ancora `shopifyAdminGraphQL` e/o
-// usano la vecchia firma (shop, token, query, variables).
-// Questo wrapper reindirizza tutto a `adminFetchGQL(query, variables)`.
-// ---------------------------------------------------------------------------
+// -------------------- Metafield: Festivi (custom.public_holidays) --------------------
+/**
+ * Legge il metafield shop custom.public_holidays e ritorna un array di date "YYYY-MM-DD".
+ * Supporta:
+ *  - value JSON array: ["2025-12-08","2025-12-25"]
+ *  - value CSV: "2025-12-08,2025-12-25"
+ *  - value stringa singola
+ */
+export async function getShopPublicHolidays(): Promise<string[]> {
+  const q = /* GraphQL */ `
+    query ShopHolidays {
+      shop {
+        metafield(namespace: "custom", key: "public_holidays") {
+          type
+          value
+        }
+      }
+    }
+  `;
+  const data = await adminFetchGQL<{
+    shop: { metafield: { type: string; value: string } | null };
+  }>(q);
+
+  const mf = data.shop?.metafield;
+  if (!mf?.value) return [];
+
+  // prova JSON prima
+  try {
+    const arr = JSON.parse(mf.value);
+    if (Array.isArray(arr)) {
+      return arr.map((s) => String(s)).filter(Boolean);
+    }
+  } catch {
+    // non JSON
+  }
+
+  // fallback CSV o stringa singola
+  if (mf.value.includes(",")) {
+    return mf.value.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  return [mf.value.trim()].filter(Boolean);
+}
+
+// -------------------- Themes: lista templates product.*.json --------------------
+/**
+ * Restituisce l'ID del tema principale e la lista delle chiavi degli asset
+ * dei template prodotto (templates/product*.json).
+ */
+export async function listThemeProductTemplates(): Promise<{
+  themeId: number;
+  templateKeys: string[];
+}> {
+  // 1) lista temi
+  const themes = await adminFetchREST<{ themes: { id: number; role: string }[] }>(
+    `/themes.json`
+  );
+  if (!themes?.themes?.length) throw new Error("Nessun tema trovato");
+
+  const main = themes.themes.find((t) => t.role === "main") ?? themes.themes[0];
+  const themeId = main.id;
+
+  // 2) lista assets del tema
+  const assets = await adminFetchREST<{ assets: { key: string }[] }>(
+    `/themes/${themeId}/assets.json`
+  );
+  const templateKeys =
+    assets.assets
+      ?.map((a) => a.key)
+      .filter((k) => k.startsWith("templates/product") && k.endsWith(".json")) ?? [];
+
+  return { themeId, templateKeys };
+}
+
+// -------------------- Files: upload da URL (write_files) --------------------
+/**
+ * Carica un file (immagine o generico) nella sezione Files di Shopify partendo da una URL esterna.
+ * Richiede scope: write_files (opzionalmente read_files).
+ * contentType: "IMAGE" | "FILE" (default "IMAGE")
+ * Ritorna l'ID del file creato.
+ */
+export async function uploadFileFromUrl(
+  originalSource: string,
+  opts?: { alt?: string; contentType?: "IMAGE" | "FILE" }
+): Promise<string> {
+  const contentType = opts?.contentType ?? "IMAGE";
+  const alt = opts?.alt ?? null;
+
+  const m = /* GraphQL */ `
+    mutation FileCreate($files: [FileCreateInput!]!) {
+      fileCreate(files: $files) {
+        files {
+          id
+          alt
+          __typename
+          ... on MediaImage { id image { url } }
+          ... on GenericFile { id url }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = {
+    files: [
+      {
+        originalSource,
+        alt,
+        contentType,
+      },
+    ],
+  };
+
+  const data = await adminFetchGQL<{
+    fileCreate: {
+      files: { id: string }[];
+      userErrors: { field?: string[]; message: string }[];
+    };
+  }>(m, variables);
+
+  const errors = data.fileCreate?.userErrors ?? [];
+  if (errors.length) {
+    const msg = errors.map((e) => e.message).join(" | ");
+    throw new Error(`fileCreate error: ${msg}`);
+  }
+
+  const id = data.fileCreate?.files?.[0]?.id;
+  if (!id) throw new Error("fileCreate: nessun file creato");
+  return id;
+}
+
+// -------------------- Compat vecchio nome --------------------
 export async function shopifyAdminGraphQL(
   a: any,
   b?: any,
