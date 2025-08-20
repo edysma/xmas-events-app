@@ -242,7 +242,7 @@ export type EnsureBundleInput = {
   imageId?: string;          // opzionale: ID file
   dayType: DayType;
   mode: "unico" | "triple";
-  priceTier€: PriceTierEuro; // in EURO — conversione a cent verrà fatta in setVariantPrices
+  "priceTier€": PriceTierEuro; // in EURO — conversione a cent in setVariantPrices
   dryRun?: boolean;
 };
 
