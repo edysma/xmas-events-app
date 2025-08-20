@@ -1,202 +1,184 @@
-export const runtime = 'nodejs';
+// app/api/events-feed/route.ts
+import { NextRequest, NextResponse } from "next/server";
 
-import { sql } from '@/lib/db';
-
-type GQL = (shop: string, token: string, query: string, vars?: Record<string, any>) => Promise<any>;
-const API_VERSION = '2024-07';
-
-const gql: GQL = async (shop, token, query, vars = {}) => {
-  const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-    method: 'POST',
+// --- Storefront GraphQL minimal client ---
+async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<T> {
+  const domain = process.env.SHOPIFY_STORE_DOMAIN!;
+  const token = process.env.SHOPIFY_STOREFRONT_TOKEN!;
+  const res = await fetch(`https://${domain}/api/2024-07/graphql.json`, {
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': token,
-      'Accept': 'application/json'
+      "content-type": "application/json",
+      "x-shopify-storefront-access-token": token,
     },
-    body: JSON.stringify({ query, variables: vars })
+    body: JSON.stringify({ query, variables }),
+    cache: "no-store",
   });
-  if (!res.ok) throw new Error(`GraphQL ${res.status}`);
-  const json = await res.json();
-  if (json.errors) throw new Error(JSON.stringify(json.errors));
-  return json.data;
-};
-
-// ---- helpers ----
-function toISO(dateStr: string): string | null {
-  if (!dateStr) return null;
-  return dateStr.slice(0, 10); // "YYYY-MM-DD"
-}
-function isWeekend(iso: string) {
-  const d = new Date(iso + 'T00:00:00');
-  const w = d.getDay(); // 0=Dom,6=Sab
-  return w === 0 || w === 6;
+  if (!res.ok) throw new Error(`Storefront ${res.status}`);
+  return res.json().then((j) => j.data);
 }
 
-// Risolve l'handle della collection in GID via REST Admin (custom+smart)
-async function collectionGidByHandle(shop: string, token: string, handle: string): Promise<string | null> {
-  // Tenta prima custom_collections
-  const base = `https://${shop}/admin/api/${API_VERSION}`;
-  const headers = { 'X-Shopify-Access-Token': token, 'Accept': 'application/json' } as const;
+/** Parser data/ora dal titolo prodotto.
+ * Supporta:
+ *   - "… — YYYY-MM-DD HH:mm"
+ *   - "… — DD/MM/YYYY HH:mm"
+ * Accetta sia EN DASH "—" sia trattino "-".
+ */
+function parseTitleForDateTime(title: string): { date: string; time: string } | null {
+  const t = (title || "").trim();
 
-  // 1) custom_collections
-  {
-    const url = `${base}/custom_collections.json?handle=${encodeURIComponent(handle)}`;
-    const r = await fetch(url, { headers });
-    if (r.ok) {
-      const j: any = await r.json();
-      const col = Array.isArray(j?.custom_collections) ? j.custom_collections[0] : null;
-      if (col?.id) return `gid://shopify/Collection/${col.id}`;
-    }
-  }
-  // 2) smart_collections
-  {
-    const url = `${base}/smart_collections.json?handle=${encodeURIComponent(handle)}`;
-    const r = await fetch(url, { headers });
-    if (r.ok) {
-      const j: any = await r.json();
-      const col = Array.isArray(j?.smart_collections) ? j.smart_collections[0] : null;
-      if (col?.id) return `gid://shopify/Collection/${col.id}`;
-    }
-  }
+  // ISO: YYYY-MM-DD HH:mm
+  const mIso = t.match(/[—-]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s*$/);
+  if (mIso) return { date: mIso[1], time: mIso[2] };
+
+  // ITA: DD/MM/YYYY HH:mm
+  const mIt = t.match(/[—-]\s*(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})\s*$/);
+  if (mIt) return { date: `${mIt[3]}-${mIt[2]}-${mIt[1]}`, time: mIt[4] };
+
   return null;
 }
 
-export async function GET(req: Request) {
-  try {
-    const url = new URL(req.url);
-    const month = (url.searchParams.get('month') || new Date().toISOString().slice(0,7)) as string; // "YYYY-MM"
-    const collectionHandle =
-      url.searchParams.get('collection') ||
-      process.env.EVENTS_COLLECTION_HANDLE; // es. "il-viaggio-incantato-del-natale"
+function isInMonth(date: string, month: string) {
+  return date.startsWith(month + "-"); // month = "YYYY-MM"
+}
 
-    if (!collectionHandle) {
-      return new Response(JSON.stringify({ error: 'Missing collection handle' }), { status: 400 });
-    }
+const TZ = "Europe/Rome";
+function weekdayRome(date: string): number {
+  const name = new Intl.DateTimeFormat("it-IT", {
+    weekday: "short",
+    timeZone: TZ,
+  })
+    .format(new Date(date + "T12:00:00Z"))
+    .toLowerCase();
+  const map: Record<string, number> = { lun:1, mar:2, mer:3, gio:4, ven:5, sab:6, dom:7 };
+  return map[name] ?? 0;
+}
+function dayTypeOf(date: string): "weekday" | "friday" | "saturday" | "sunday" | "holiday" {
+  const w = weekdayRome(date);
+  if (w === 6) return "saturday";
+  if (w === 7) return "sunday";
+  if (w === 5) return "friday";
+  return "weekday";
+}
 
-    // 1) prendi lo shop installato (token salvato alla installazione)
-    const { rows } = await sql`SELECT shop, access_token FROM shops LIMIT 1`;
-    if (!rows.length) {
-      return new Response(JSON.stringify({ error: 'No installed shop found' }), { status: 500 });
-    }
-    const { shop, access_token: token } = rows[0] as { shop: string; access_token: string };
-
-    // 2) risolvi handle -> GID collection
-    const collectionGid = await collectionGidByHandle(shop, token, collectionHandle);
-    if (!collectionGid) {
-      return new Response(JSON.stringify({ error: `Collection not found for handle "${collectionHandle}"` }), { status: 404 });
-    }
-
-    // 3) (facoltativo) leggi i festivi dal metafield di negozio
-    let holidays: string[] = [];
-    try {
-      const d = await gql(shop, token, `
-        query {
-          shop {
-            metafield(namespace:"custom", key:"public_holidays"){ value }
-          }
-        }`);
-      const raw = d?.shop?.metafield?.value as string | undefined;
-      if (raw) {
-        try {
-          const arr = JSON.parse(raw);
-          if (Array.isArray(arr)) holidays = arr.map((x: string) => toISO(x)).filter(Boolean) as string[];
-        } catch {
-          holidays = raw.split(/[,\s]+/).map(toISO).filter(Boolean) as string[];
-        }
-      }
-    } catch { /* ok se non esiste */ }
-
-    // 4) pagina i prodotti della collection (ora per ID)
-    const events: any[] = [];
-    let cursor: string | null = null;
-
-    do {
-      const data = await gql(shop, token, `
-        query Fetch($id: ID!, $cursor: String) {
-          collection(id: $id){
-            products(first: 100, after: $cursor) {
-              edges {
-                cursor
-                node {
-                  handle
-                  tags
-                  metafield(namespace:"custom", key:"event_date"){ value }
-                  variants(first: 100) {
-                    edges {
-                      node {
-                        id
-                        title
-                        availableForSale
-                        inventoryQuantity
-                        selectedOptions { name value }
-                      }
-                    }
-                  }
-                }
-              }
-              pageInfo { hasNextPage endCursor }
+const Q_COLLECTION_PRODUCTS = /* GraphQL */ `
+  query CollectionByHandle($handle: String!, $cursor: String) {
+    collection(handle: $handle) {
+      products(first: 100, after: $cursor) {
+        edges {
+          cursor
+          node {
+            id
+            title
+            variants(first: 20) {
+              edges { node { id title } }
             }
+            tags
           }
         }
-      `, { id: collectionGid, cursor });
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
 
-      const edges = data?.collection?.products?.edges || [];
-      const pageInfo = data?.collection?.products?.pageInfo;
+// Dalla lista varianti, individua se "unico" oppure triple, e mappa ID.
+function extractVariantMap(variants: Array<{ title: string; id: string }>) {
+  const out: Record<"unico"|"adulto"|"bambino"|"handicap", string|undefined> = {
+    unico: undefined, adulto: undefined, bambino: undefined, handicap: undefined
+  };
+  for (const v of variants) {
+    const t = (v.title || "").toLowerCase();
+    if (t.includes("unico")) out.unico = v.id;
+    else if (t.includes("adulto")) out.adulto = v.id;
+    else if (t.includes("bambino")) out.bambino = v.id;
+    else if (t.includes("handicap")) out.handicap = v.id;
+  }
+  const mode: "unico" | "triple" | null = out.unico ? "unico" : (out.adulto || out.bambino || out.handicap) ? "triple" : null;
+  return { mode, map: out };
+}
 
+export async function GET(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const month = searchParams.get("month") || "";
+    const collection = searchParams.get("collection") || "";
+
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return NextResponse.json({ ok:false, error:"invalid_month" }, { status:400 });
+    }
+    if (!collection) {
+      return NextResponse.json({ ok:false, error:"missing_collection" }, { status:400 });
+    }
+
+    // 1) Carica prodotti della collezione dal canale pubblico (Storefront)
+    let cursor: string | null = null;
+    const products: Array<{ id: string; title: string; variants: Array<{ id: string; title: string }>, tags: string[] }> = [];
+
+    while (true) {
+      const data = await sfGQL<{
+        collection: {
+          products: {
+            edges: { cursor: string; node: { id: string; title: string; tags: string[]; variants: { edges: { node: { id: string; title: string } }[] } } }[];
+            pageInfo: { hasNextPage: boolean };
+          };
+        } | null;
+      }>(Q_COLLECTION_PRODUCTS, { handle: collection, cursor });
+
+      const edges = data.collection?.products.edges || [];
       for (const e of edges) {
-        const p = e.node;
-        const iso = toISO(p?.metafield?.value);
-        if (!iso) continue;
-        if (iso.slice(0,7) !== month) continue;
-
-        const tags = (p.tags || []).map((t: string) => String(t).toLowerCase());
-        const hasTag = tags.includes('festivo');
-        const inList = holidays.includes(iso);
-        const day_type = (hasTag || inList || isWeekend(iso)) ? 'holiday' : 'weekday';
-
-        let remaining = 0;
-        const slots: any[] = [];
-        for (const ve of (p.variants?.edges || [])) {
-          const n = ve.node;
-          const opt1 = (n.selectedOptions || []).find((o:any) => /option ?1/i.test(o.name))?.value || n.title;
-          const qty = Math.max(0, Number(n.inventoryQuantity ?? 0));
-          remaining += qty;
-          if (opt1) {
-            // cart/add.js vuole l'ID numerico della variante
-            const numericId = Number(String(n.id).replace(/\D/g,''));
-            slots.push({
-              label: opt1,
-              id: numericId,
-              rem: qty,
-              available: n.availableForSale
-            });
-          }
-        }
-
-        events.push({
-          date: iso,
-          handle: p.handle,
-          day_type,
-          available: remaining > 0,
-          remaining,
-          slots
+        products.push({
+          id: e.node.id,
+          title: e.node.title,
+          tags: e.node.tags || [],
+          variants: (e.node.variants?.edges || []).map(x => ({ id: x.node.id, title: x.node.title })),
         });
       }
+      if (!data.collection?.products.pageInfo.hasNextPage) break;
+      cursor = edges[edges.length - 1].cursor;
+    }
 
-      cursor = pageInfo?.hasNextPage ? pageInfo?.endCursor : null;
-    } while (cursor);
+    // 2) Filtra solo i "Bundle" (tag Bundle) e costruisci calendario
+    type Slot = {
+      time: string;
+      day_type: "weekday" | "friday" | "saturday" | "sunday" | "holiday";
+      bundleVariantId_single?: string;
+      bundleVariantId_adulto?: string;
+      bundleVariantId_bambino?: string;
+      bundleVariantId_handicap?: string;
+    };
+    const byDate: Record<string, Slot[]> = {};
 
-return new Response(JSON.stringify({ month, events }), {
-  headers: {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    // Cache CDN 5 minuti + serve versione "stale" fino a 10 minuti mentre si rigenera
-    'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600'
-  }
-});
+    for (const p of products) {
+      if (!p.tags?.includes("Bundle")) continue;
 
+      const parsed = parseTitleForDateTime(p.title);
+      if (!parsed) continue;
+      if (!isInMonth(parsed.date, month)) continue;
 
+      const { mode, map } = extractVariantMap(p.variants);
+      if (!mode) continue;
+
+      const dt = dayTypeOf(parsed.date);
+      const slot: Slot = { time: parsed.time, day_type: dt };
+      if (mode === "unico") {
+        if (map.unico) slot.bundleVariantId_single = map.unico;
+      } else {
+        if (map.adulto)   slot.bundleVariantId_adulto   = map.adulto;
+        if (map.bambino)  slot.bundleVariantId_bambino  = map.bambino;
+        if (map.handicap) slot.bundleVariantId_handicap = map.handicap;
+      }
+
+      byDate[parsed.date] = byDate[parsed.date] || [];
+      byDate[parsed.date].push(slot);
+    }
+
+    const events = Object.keys(byDate)
+      .sort()
+      .map((date) => ({ date, slots: byDate[date].sort((a,b) => a.time.localeCompare(b.time)) }));
+
+    return NextResponse.json({ month, events }, { status: 200 });
   } catch (err: any) {
-    return new Response(JSON.stringify({ error: String(err?.message || err) }), { status: 500 });
+    return NextResponse.json({ month: "", events: [], error: String(err?.message || err) }, { status: 500 });
   }
 }
