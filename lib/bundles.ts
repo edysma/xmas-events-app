@@ -466,32 +466,91 @@ async function waitForVariant(variantId: string, tries = 6): Promise<void> {
 }
 
 /**
- * Collega la variante "bundle" (parentVariantId) alla variante "seat" (child) con qty desiderata.
- * Per Handicap usare qty=2.
+ * Collega la variante "bundle" (parentVariantId) alla variante "seat" (childVariantId) con qty desiderata.
+ * Idempotente: aggiorna se esiste, crea se manca, rimuove duplicati in eccesso.
  */
-export async function upsertBundleComponents(params: { parentVariantId: string; childVariantId: string; qty: number; }) {
-  // Evita autocollegamento (errore Shopify)
-  if (params.parentVariantId === params.childVariantId) {
-    throw new Error("bundle components error: parentVariantId === childVariantId");
+export async function upsertBundleComponents(params: {
+  parentVariantId: string;
+  childVariantId: string;
+  qty: number;
+}) {
+  const { parentVariantId, childVariantId, qty } = params;
+
+  // 0) assicurati che entrambe le varianti siano visibili
+  await waitForVariant(parentVariantId);
+  await waitForVariant(childVariantId);
+
+  // 1) leggi componenti correnti del parent
+  const Q_COMPS = /* GraphQL */ `
+    query PVComps($id: ID!) {
+      productVariant(id: $id) {
+        id
+        productVariantComponents(first: 100) {
+          nodes {
+            id
+            quantity
+            productVariant { id }
+          }
+        }
+      }
+    }
+  `;
+  const compData = await adminFetchGQL<{
+    productVariant: {
+      productVariantComponents?: {
+        nodes: { id: string; quantity?: number | null; productVariant: { id: string } }[];
+      } | null
+    } | null
+  }>(Q_COMPS, { id: parentVariantId });
+
+  const nodes = compData.productVariant?.productVariantComponents?.nodes ?? [];
+  const sameChild = nodes.filter(n => n.productVariant.id === childVariantId);
+  const othersForDelete: string[] = sameChild.slice(1).map(n => n.id); // extra duplicati
+  const first = sameChild[0];
+
+  // 2) costruisci input "bulk update" con create/update/delete
+  const input: any = {
+    parentProductVariantId: parentVariantId,
+  };
+
+  if (!first) {
+    // non esiste → crea
+    input.productVariantRelationshipsToCreate = [{
+      id: childVariantId,
+      quantity: qty,
+    }];
+  } else {
+    // esiste → aggiorna qty se diversa
+    if ((first.quantity ?? null) !== qty) {
+      input.productVariantRelationshipsToUpdate = [{
+        id: first.id,
+        quantity: qty,
+      }];
+    }
+    // elimina duplicati extra (se presenti)
+    if (othersForDelete.length) {
+      input.productVariantRelationshipsToDelete = othersForDelete;
+    }
   }
 
-  // 1) assicurati che entrambe le varianti siano "visibili" all'API
-  await waitForVariant(params.parentVariantId);
-  await waitForVariant(params.childVariantId);
+  // se non c'è nulla da fare, esci
+  if (
+    !input.productVariantRelationshipsToCreate &&
+    !input.productVariantRelationshipsToUpdate &&
+    !input.productVariantRelationshipsToDelete
+  ) {
+    return;
+  }
 
-  // 2) esegui la mutation bundle
-  const input = [
-    {
-      parentProductVariantId: params.parentVariantId,
-      productVariantRelationshipsToCreate: [{ id: params.childVariantId, quantity: params.qty }],
-    },
-  ];
-
-  const res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors: { code?: string; field?: string[]; message: string }[] } }>(
-    M_VARIANT_REL_BULK_UPDATE,
-    { input }
-  );
+  const res = await adminFetchGQL<{
+    productVariantRelationshipBulkUpdate: {
+      userErrors: { code?: string; field?: string[]; message: string }[];
+    };
+  }>(M_VARIANT_REL_BULK_UPDATE, { input: [input] });
 
   const errs = (res as any).productVariantRelationshipBulkUpdate?.userErrors || [];
-  if (errs.length) throw new Error(`bundle components error: ${errs.map((e: any) => e.message).join(" | ")}`);
+  if (errs.length) {
+    throw new Error(`bundle components error: ${errs.map((e: any) => e.message).join(" | ")}`);
+  }
 }
+
