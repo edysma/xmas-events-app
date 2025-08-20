@@ -2,6 +2,98 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminFetchGQL } from "@/lib/shopify-admin";
 
+function extractFromTitle(title: string, handle: string): { date: string; time: string } | null {
+  // Titolo atteso: "<handle> — YYYY-MM-DD HH:mm"
+  const rx = new RegExp(`^${handle}\\s+—\\s+(\\d{4}-\\d{2}-\\d{2})\\s+(\\d{2}:\\d{2})$`, "i");
+  const m = title.match(rx);
+  if (!m) return null;
+  return { date: m[1], time: m[2] };
+}
+
+async function fallbackEventsFromShopify(eventHandle: string, month: string) {
+  const monthPrefix = `${month}-`; // es. "2025-12-"
+  // Cerchiamo prodotti con tag: Bundle + eventHandle e titolo che inizia con "<handle> — YYYY-MM-"
+  const q = `tag:Bundle tag:${eventHandle} "${eventHandle} — ${monthPrefix}"`;
+
+  const Q = /* GraphQL */ `
+    query ProductsByQuery($q: String!, $after: String) {
+      products(first: 100, query: $q, after: $after) {
+        edges {
+          cursor
+          node {
+            id
+            title
+            variants(first: 10) {
+              edges { node { id title } }
+            }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+  `;
+
+  type VariantEdge = { node: { id: string; title: string } };
+  type GqlResp = {
+    products: {
+      edges: { cursor: string; node: { id: string; title: string; variants?: { edges: VariantEdge[] } } }[];
+      pageInfo: { hasNextPage: boolean };
+    };
+  };
+
+  const products: { id: string; title: string; variants: { id: string; title: string }[] }[] = [];
+  let after: string | null = null;
+
+  while (true) {
+    const resp = await adminFetchGQL<GqlResp>(Q, { q, after });
+    for (const e of resp.products.edges) {
+      const node = e.node;
+      products.push({
+        id: node.id,
+        title: node.title,
+        variants: (node.variants?.edges || []).map(v => ({ id: v.node.id, title: v.node.title })),
+      });
+    }
+    if (!resp.products.pageInfo.hasNextPage) break;
+    after = resp.products.edges[resp.products.edges.length - 1].cursor;
+  }
+
+  // Raggruppa per data -> slots[]
+  const byDate: Record<string, any[]> = {};
+  const lower = (s: string) => s.toLowerCase();
+
+  for (const p of products) {
+    const dt = extractFromTitle(p.title, eventHandle);
+    if (!dt) continue;
+
+    const map = {
+      unico:    p.variants.find(v => lower(v.title).includes("unico"))?.id,
+      adulto:   p.variants.find(v => lower(v.title).includes("adulto"))?.id,
+      bambino:  p.variants.find(v => lower(v.title).includes("bambino"))?.id,
+      handicap: p.variants.find(v => lower(v.title).includes("handicap"))?.id,
+    };
+
+    const slot: any = { time: dt.time };
+    if (map.unico) {
+      slot.bundleVariantId_single = map.unico;
+    } else {
+      if (map.adulto)   slot.bundleVariantId_adulto   = map.adulto;
+      if (map.bambino)  slot.bundleVariantId_bambino  = map.bambino;
+      if (map.handicap) slot.bundleVariantId_handicap = map.handicap;
+    }
+
+    byDate[dt.date] = byDate[dt.date] || [];
+    byDate[dt.date].push(slot);
+  }
+
+  const dates = Object.keys(byDate).sort();
+  return dates.map(d => ({
+    date: d,
+    slots: byDate[d].sort((a, b) => a.time.localeCompare(b.time)),
+  }));
+}
+
+
 const TZ = "Europe/Rome";
 
 function weekdayRome(date: string): number {
