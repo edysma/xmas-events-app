@@ -246,8 +246,18 @@ export async function ensureInventory(opts: {
   variantId: string;
   locationId?: string;
   quantity: number;
+  dryRun?: boolean; // <— aggiunto per compat con route.ts
 }) {
   const locationId = opts.locationId || (await getDefaultLocationId());
+
+  // Dry-run: non scrive nulla, ma torna subito
+  if (opts.dryRun) {
+    return {
+      ok: true,
+      dryRun: true,
+      set: { variantId: opts.variantId, locationId, name: "available", quantity: opts.quantity },
+    };
+  }
 
   // Per inventorySetQuantities serve l'inventoryItemId
   const Q_VAR = /* GraphQL */ `
@@ -285,6 +295,7 @@ export async function ensureInventory(opts: {
   const errs = (res as any).inventorySetQuantities?.userErrors || [];
   if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map((e: any) => e.message).join(" | ")}`);
 }
+
 
 /**
  * Crea/riusa il prodotto "Biglietto" e le sue varianti in base al mode.
