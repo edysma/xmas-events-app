@@ -27,17 +27,27 @@ async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<
  * Accetta sia EN DASH "—" sia trattino "-".
  */
 function parseTitleForDateTime(title: string): { date: string; time: string } | null {
-  const t = (title || "").trim();
+  // Accetta sia YYYY-MM-DD che DD/MM/YYYY dopo il "—" (o "-") + HH:mm
+  const m =
+    title.match(/—\s*([0-9/ -]{10})\s+(\d{2}:\d{2})$/) ||
+    title.match(/-\s*([0-9/ -]{10})\s+(\d{2}:\d{2})$/);
+  if (!m) return null;
 
-  // ISO: YYYY-MM-DD HH:mm
-  const mIso = t.match(/[—-]\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s*$/);
-  if (mIso) return { date: mIso[1], time: mIso[2] };
+  const rawDate = m[1].trim();
+  const time = m[2];
 
-  // ITA: DD/MM/YYYY HH:mm  -> normalizzo in YYYY-MM-DD
-  const mIt = t.match(/[—-]\s*(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})\s*$/);
-  if (mIt) return { date: `${mIt[3]}-${mIt[2]}-${mIt[1]}`, time: mIt[4] };
+  // Se è DD/MM/YYYY -> converti in YYYY-MM-DD
+  let yyyyMmDd: string;
+  if (rawDate.includes("/")) {
+    const [dd, mm, yyyy] = rawDate.split("/");
+    if (!yyyy || !mm || !dd) return null;
+    yyyyMmDd = `${yyyy}-${mm}-${dd}`;
+  } else {
+    // Già nel formato YYYY-MM-DD
+    yyyyMmDd = rawDate;
+  }
 
-  return null;
+  return { date: yyyyMmDd, time };
 }
 
 function isInMonth(date: string, month: string) {
