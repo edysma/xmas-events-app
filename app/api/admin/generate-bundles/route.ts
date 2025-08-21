@@ -203,6 +203,141 @@ async function previewFromFeed(req: NextRequest, body: any) {
     { status: 200 }
   );
 }
+async function generateFromFeed(req: NextRequest, body: any) {
+  // Validazioni minime per creazione reale
+  if (body.dryRun !== false) {
+    return NextResponse.json({ ok: false, error: "bad_request", detail: "dryRun:false richiesto per creare dal feed" }, { status: 400 });
+  }
+  if (!body["prices€"] || typeof body["prices€"] !== "object") {
+    return NextResponse.json({ ok: false, error: "missing_prices", detail: 'Passa "prices€" nel body (per day type)' }, { status: 400 });
+  }
+  if (typeof body.capacityPerSlot !== "number" || body.capacityPerSlot <= 0) {
+    return NextResponse.json({ ok: false, error: "missing_capacity", detail: 'Passa "capacityPerSlot" > 0' }, { status: 400 });
+  }
+
+  // 1) Leggi feed
+  const origin = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : `${req.headers.get("x-forwarded-proto") ?? "https"}://${req.headers.get("host")}`;
+
+  const u = new URL("/api/admin/events-feed-bundles", origin);
+  u.searchParams.set("month", body.month);
+  u.searchParams.set("collection", body.collection);
+  u.searchParams.set("source", body.source ?? "manual");
+
+  const res = await fetch(u.toString(), {
+    headers: { "x-admin-secret": req.headers.get("x-admin-secret") || "" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`feed error: ${res.status} ${t}`);
+  }
+  const feed = await res.json();
+
+  // 2) Helper per tipo giorno
+  const toDayType = (s: any): DayType => {
+    const v = String(s || "").toLowerCase();
+    if (v === "holiday") return "holiday";
+    if (v === "saturday") return "saturday";
+    if (v === "sunday") return "sunday";
+    if (v === "friday") return "friday";
+    return "weekday";
+  };
+
+  // 3) Scorri eventi/slot e crea
+  let seatsCreated = 0;
+  let bundlesCreated = 0;
+  let variantsCreated = 0;
+  const preview: any[] = [];
+  const warnings: string[] = [];
+
+  const eventHandle = feed?.eventHandle || body.collection || "evento";
+  const templateSuffix = body.templateSuffix;
+  const tags = body.tags;
+  const description = body.description;
+  const locationId = body.locationId ?? null;
+  const prices = body["prices€"] as PricesEuro;
+
+  const getTierFor = (dt: DayType): PriceTierEuro | undefined => {
+    if (dt === "holiday") return prices.holiday;
+    if (dt === "saturday") return prices.saturday;
+    if (dt === "sunday") return prices.sunday;
+    if (dt === "friday") return prices.friday ?? prices.feriali;
+    return prices.feriali;
+  };
+
+  const events = Array.isArray(feed?.events) ? feed.events : [];
+  for (const d of events) {
+    const date = String(d?.date || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { warnings.push(`Giorno ignorato: "${d?.date}"`); continue; }
+    const slots = Array.isArray(d?.slots) ? d.slots : [];
+    for (const s of slots) {
+      const time = String(s?.time || "").slice(0, 5);
+      if (!/^\d{2}:\d{2}$/.test(time)) { warnings.push(`Slot ignorato: "${s?.time}" (${date})`); continue; }
+      const dt = toDayType(s?.day_type ?? s?.dayType);
+      const tier = getTierFor(dt);
+      if (!tier) { warnings.push(`Prezzi mancanti per ${date} ${time} (${dt})`); continue; }
+
+      // crea/riusa Seat
+      const seat = await ensureSeatUnit({
+        date, time, titleBase: eventHandle, tags, description, templateSuffix, dryRun: false,
+      });
+      if (seat.created) seatsCreated++;
+
+      // stock iniziale
+      await ensureInventory({
+        variantId: seat.variantId, locationId: locationId ?? undefined, quantity: body.capacityPerSlot, dryRun: false,
+      });
+
+      // modalità: sempre triple se dal feed (Adulto/Bambino/Handicap)
+      const bundle = await ensureBundle({
+        eventHandle, date, time, titleBase: eventHandle, templateSuffix, tags, description,
+        dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false,
+      });
+      if (bundle.createdProduct) bundlesCreated++;
+      variantsCreated += bundle.createdVariants ?? 0;
+
+      // collega componenti (qty: 1/1/2)
+      const compPlan: (["adulto"|"bambino"|"handicap", number])[] = [["adulto",1],["bambino",1],["handicap",2]];
+      for (const [k, qty] of compPlan) {
+        const parentVariantId = bundle.variantMap[k];
+        if (!parentVariantId) continue;
+        await ensureVariantLeadsToSeat({
+          bundleVariantId: parentVariantId,
+          seatVariantId: seat.variantId,
+          componentQuantity: qty,
+          dryRun: false,
+        });
+      }
+
+      // prezzi
+      const pricesToSet: Record<string, number | undefined> = {};
+      if (bundle.variantMap.adulto && typeof tier.adulto === "number")   pricesToSet[bundle.variantMap.adulto] = tier.adulto;
+      if (bundle.variantMap.bambino && typeof tier.bambino === "number") pricesToSet[bundle.variantMap.bambino] = tier.bambino;
+      if (bundle.variantMap.handicap && typeof tier.handicap === "number") pricesToSet[bundle.variantMap.handicap] = tier.handicap;
+
+      if (Object.keys(pricesToSet).length) {
+        await setVariantPrices(bundle.productId, pricesToSet);
+      }
+
+      // preview breve
+      if (preview.length < 10) {
+        preview.push({
+          date, time, dayType: dt,
+          seatProductId: seat.productId,
+          bundleProductId: bundle.productId,
+          variantMap: bundle.variantMap,
+        });
+      }
+    }
+  }
+
+  return NextResponse.json(
+    { ok: true, summary: { seatsCreated, bundlesCreated, variantsCreated }, preview, warnings },
+    { status: 200 }
+  );
+}
 
 
 export async function POST(req: NextRequest) {
@@ -225,11 +360,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
     }
 
-    // Supporto feed preview: se arrivano month+collection → anteprima dal feed (nessuna creazione)
+    // Supporto feed: se arrivano month+collection
 const anyBody = body as any;
 if (anyBody?.month && anyBody?.collection) {
+  // dryRun true => solo preview; dryRun false => creazione reale
+  if (anyBody.dryRun === false) {
+    return await generateFromFeed(req, anyBody);
+  }
   return await previewFromFeed(req, anyBody);
 }
+
 
 
 // Altrimenti accettiamo solo source:"manual" (comportamento esistente)
