@@ -246,10 +246,12 @@ export async function POST(req: NextRequest) {
             const parentVariantId = bundle.variantMap[k];
             if (!parentVariantId) continue;
             await ensureVariantLeadsToSeat({
-              parentVariantId,
-              childVariantId: seat.variantId,
-              qty,
-            });
+  bundleVariantId: parentVariantId,
+  seatVariantId: seat.variantId,
+  componentQuantity: qty,
+  dryRun: input.dryRun,
+});
+
           }
         }
 
