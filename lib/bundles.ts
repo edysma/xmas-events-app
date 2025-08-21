@@ -91,7 +91,7 @@ const M_PRODUCT_CREATE = /* GraphQL */ `
   mutation ProductCreate($input: ProductInput!) {
     productCreate(input: $input) {
       product { id title status templateSuffix tags variants(first: 20) { edges { node { id title selectedOptions { name value } inventoryItem { id } } } } }
-      userErrors { field message code }
+      userErrors { field message }
     }
   }
 `;
@@ -115,7 +115,7 @@ const M_PRODUCT_UPDATE = /* GraphQL */ `
   mutation ProductUpdate($input: ProductInput!) {
     productUpdate(input: $input) {
       product { id title status templateSuffix tags }
-      userErrors { field message code }
+      userErrors { field message }
     }
   }
 `;
@@ -124,7 +124,7 @@ const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
   mutation PVBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy!) {
     productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
       productVariants { id title selectedOptions { name value } }
-      userErrors { field message code }
+      userErrors { field message }
     }
   }
 `;
@@ -132,7 +132,7 @@ const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
 const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ `
   mutation PVRRelBulkUpdate($input: [ProductVariantRelationshipUpdateInput!]!) {
     productVariantRelationshipBulkUpdate(input: $input) {
-      userErrors { code field message }
+      userErrors { field message }
     }
   }
 `;
@@ -151,7 +151,7 @@ const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
           quantityAfterChange
         }
       }
-      userErrors { field message code }
+      userErrors { field message }
     }
   }
 `;
@@ -446,7 +446,7 @@ export async function setVariantPrices(
   const M = /* GraphQL */ `
   mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-      userErrors { field message code }
+      userErrors { field message }
     }
   }
 `;
