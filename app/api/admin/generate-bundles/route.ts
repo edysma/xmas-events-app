@@ -3,11 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getShopPublicHolidays } from "@/lib/shopify-admin";
 import {
   ensureSeatUnit,
-  ensureInventory,
   ensureBundle,
   setVariantPrices,
-  upsertBundleComponents,
+  ensureVariantLeadsToSeat,
 } from "@/lib/bundles";
+
 import type {
   GenerateInput,
   ManualInput,
@@ -244,7 +244,7 @@ export async function POST(req: NextRequest) {
           for (const [k, qty] of compOps) {
             const parentVariantId = bundle.variantMap[k];
             if (!parentVariantId) continue;
-            await upsertBundleComponents({
+            await ensureVariantLeadsToSeat({
               parentVariantId,
               childVariantId: seat.variantId,
               qty,
