@@ -6,6 +6,7 @@ import {
   ensureBundle,
   setVariantPrices,
   ensureVariantLeadsToSeat,
+  ensureInventory, // <-- aggiunto
 } from "@/lib/bundles";
 
 import type {
