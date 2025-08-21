@@ -435,10 +435,13 @@ export async function setVariantPrices(
   mapEuro: Record<string, number | undefined>
 ) {
   const variantsInput = Object.entries(mapEuro)
-    .filter(([, eur]) => typeof eur === "number" && Number.isFinite(eur as number))
-    .map(([id, eur]) => ({ id, price: { amount: String(eur), currencyCode: "EUR" } }));
+  .filter(([, eur]) => typeof eur === "number" && Number.isFinite(eur as number))
+  .map(([id, eur]) => ({
+    id,
+    // Schema 2024-10: price come STRINGA decimale (niente currencyCode)
+    price: (eur as number).toFixed(2),
+  }));
 
-  if (!variantsInput.length) return { ok: true };
 
   const M = /* GraphQL */ `
   mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
