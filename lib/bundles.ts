@@ -185,8 +185,7 @@ async function createProductDraft(opts: {
         status: "DRAFT",
         templateSuffix: opts.templateSuffix || undefined,
         tags: opts.tags || undefined,
-        descriptionHtml: opts.descriptionHtml || undefined,
-        options: ["Title"], // unica opzione per le varianti dei Bundle
+        descriptionHtml: opts.descriptionHtml || undefined
       },
     }
   );
@@ -196,6 +195,7 @@ async function createProductDraft(opts: {
   if (!product?.id) throw new Error("productCreate: product.id mancante");
   return product;
 }
+
 
 async function getProductById(id: string) {
   const data = await adminFetchGQL<{ product: any }>(Q_PRODUCT_BY_ID, { id });
