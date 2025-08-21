@@ -50,6 +50,15 @@ export default function Page() {
     }).toString();
     await run(`/api/admin/events-feed-bundles?${qs}`); // richiede secret
   }
+// sotto le altre funzioni (es. handleEventsBundles)
+async function handleGenerateBundlesDryRun() {
+  const qs = new URLSearchParams({
+    month: month.trim(),
+    collection: handle.trim(),
+    dryRun: '1',
+  }).toString();
+  await run(`/api/admin/generate-bundles?${qs}`); // richiede secret
+}
 
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial' }}>
@@ -109,6 +118,15 @@ export default function Page() {
           <button onClick={handleEventsBundles} disabled={loading || !secret} style={{ padding: '8px 12px' }}>
             {loading ? 'Eseguo…' : 'Eventi (bundles) del mese'}
           </button>
+
+          <button
+  onClick={handleGenerateBundlesDryRun}
+  disabled={loading || !secret}
+  style={{ padding: '8px 12px' }}
+>
+  {loading ? 'Eseguo…' : 'Genera bundles (dry‑run)'}
+</button>
+
         </div>
 
         <div>
