@@ -136,11 +136,11 @@ const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
 const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ `
   mutation PVRRelBulkUpdate($input: [ProductVariantRelationshipUpdateInput!]!) {
     productVariantRelationshipBulkUpdate(input: $input) {
-      productVariantRelationships { sourceId targetId type }
       userErrors { code field message }
     }
   }
 `;
+
 
 // Inventario: payload corretto (input = InventorySetQuantitiesInput!)
 const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
