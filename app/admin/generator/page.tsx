@@ -1,141 +1,90 @@
-'use client';
+// app/admin/generator/page.tsx
+"use client";
 
-import React from 'react';
+import { useState } from "react";
 
-export default function Page() {
-  const [secret, setSecret] = React.useState('');
-  const [month, setMonth] = React.useState('2025-12');             // 🔹 nuovo
-  const [handle, setHandle] = React.useState('viaggio-incantato'); // 🔹 nuovo
-  const [result, setResult] = React.useState<string>('');
-  const [loading, setLoading] = React.useState(false);
+export default function AdminGenerator() {
+  const [log, setLog] = useState<string>("(nessun output)");
+  const [month, setMonth] = useState("2025-12");
+  const [collection, setCollection] = useState("viaggio-incantato");
 
-  async function run(path: string, opts?: RequestInit) {
-    setLoading(true);
-    setResult('');
+  const ADMIN_BASE = ""; // stesso dominio della pagina
+  const ADMIN_SECRET = process.env.NEXT_PUBLIC_ADMIN_SECRET || "";
+
+  async function callGenerate(dryRun: boolean) {
+    setLog("Esecuzione in corso…");
     try {
-      const res = await fetch(path, {
-        method: 'GET',
+      const res = await fetch(`${ADMIN_BASE}/api/admin/generate-bundles`, {
+        method: "POST",
         headers: {
-          'x-admin-secret': secret || '',
-          ...(opts?.headers || {}),
+          "Content-Type": "application/json",
+          "x-admin-secret": ADMIN_SECRET,
         },
-        ...opts,
+        body: JSON.stringify({
+          month,
+          collection,
+          source: "manual",
+          dryRun,
+        }),
       });
+
       const text = await res.text();
-      setResult(text);
+      // prova a fare parse, altrimenti mostra raw
+      try {
+        const json = JSON.parse(text);
+        setLog(JSON.stringify(json, null, 2));
+      } catch {
+        setLog(text || `(HTTP ${res.status})`);
+      }
     } catch (err: any) {
-      setResult(String(err?.message || err));
-    } finally {
-      setLoading(false);
+      setLog(`Errore: ${err?.message || String(err)}`);
     }
   }
 
-  async function handlePing() {
-    await run('/api/admin-ping'); // non richiede secret
-  }
-
-  async function handleHolidays() {
-    await run('/api/admin/holidays'); // richiede secret
-  }
-
-  async function handleLoc() {
-    await run('/api/admin/loc'); // richiede secret
-  }
-
-  // 🔹 nuovo: eventi bundles del mese
-  async function handleEventsBundles() {
-    const qs = new URLSearchParams({
-      month: month.trim(),
-      collection: handle.trim(),
-    }).toString();
-    await run(`/api/admin/events-feed-bundles?${qs}`); // richiede secret
-  }
-// sotto le altre funzioni (es. handleEventsBundles)
-async function handleGenerateBundlesDryRun() {
-  const qs = new URLSearchParams({
-    month: month.trim(),
-    collection: handle.trim(),
-    dryRun: '1',
-  }).toString();
-  await run(`/api/admin/generate-bundles?${qs}`); // richiede secret
-}
-
   return (
-    <main style={{ padding: 24, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial' }}>
-      <h1>Generatore Biglietti (Preview)</h1>
-      <p>Mini-pannello di test per le API admin.</p>
+    <main style={{ padding: 24, maxWidth: 900, margin: "0 auto" }}>
+      <h1>Admin • Generator</h1>
 
-      <div style={{ marginTop: 24, display: 'grid', gap: 12, maxWidth: 720 }}>
+      <div style={{ display: "grid", gap: 12, maxWidth: 500 }}>
         <label>
-          <div>Admin Secret (x-admin-secret)</div>
+          Mese (YYYY-MM)
           <input
-            type="password"
-            placeholder="incolla qui il segreto"
-            value={secret}
-            onChange={(e) => setSecret(e.target.value)}
-            style={{ width: '100%', padding: 8 }}
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            placeholder="2025-12"
+            style={{ width: "100%", padding: 8 }}
           />
         </label>
 
-        {/* 🔹 nuovi campi */}
-        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
-          <label>
-            <div>Mese (YYYY-MM)</div>
-            <input
-              type="text"
-              value={month}
-              onChange={(e) => setMonth(e.target.value)}
-              placeholder="es. 2025-12"
-              style={{ width: '100%', padding: 8 }}
-            />
-          </label>
-          <label>
-            <div>Handle evento (collection)</div>
-            <input
-              type="text"
-              value={handle}
-              onChange={(e) => setHandle(e.target.value)}
-              placeholder="es. viaggio-incantato"
-              style={{ width: '100%', padding: 8 }}
-            />
-          </label>
-        </div>
+        <label>
+          Handle evento (collection)
+          <input
+            value={collection}
+            onChange={(e) => setCollection(e.target.value)}
+            placeholder="viaggio-incantato"
+            style={{ width: "100%", padding: 8 }}
+          />
+        </label>
 
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button onClick={handlePing} disabled={loading} style={{ padding: '8px 12px' }}>
-            {loading ? 'Eseguo…' : 'Ping Admin API'}
-          </button>
-
-          <button onClick={handleHolidays} disabled={loading || !secret} style={{ padding: '8px 12px' }}>
-            {loading ? 'Eseguo…' : 'Leggi festività'}
-          </button>
-
-          <button onClick={handleLoc} disabled={loading || !secret} style={{ padding: '8px 12px' }}>
-            {loading ? 'Eseguo…' : 'Leggi Location ID'}
-          </button>
-
-          {/* 🔹 nuovo bottone */}
-          <button onClick={handleEventsBundles} disabled={loading || !secret} style={{ padding: '8px 12px' }}>
-            {loading ? 'Eseguo…' : 'Eventi (bundles) del mese'}
-          </button>
-
-          <button
-  onClick={handleGenerateBundlesDryRun}
-  disabled={loading || !secret}
-  style={{ padding: '8px 12px' }}
->
-  {loading ? 'Eseguo…' : 'Genera bundles (dry‑run)'}
-</button>
-
-        </div>
-
-        <div>
-          <div>Risultato:</div>
-          <pre style={{ background: '#111', color: '#0f0', padding: 12, whiteSpace: 'pre-wrap' }}>
-            {result || '(nessun output ancora)'}
-          </pre>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => callGenerate(true)}>Genera bundles (dry‑run)</button>
+          <button onClick={() => callGenerate(false)}>Genera bundles (real)</button>
         </div>
       </div>
+
+      <h3 style={{ marginTop: 24 }}>Output</h3>
+      <pre
+        style={{
+          background: "#111",
+          color: "#0f0",
+          padding: 16,
+          borderRadius: 8,
+          minHeight: 180,
+          overflow: "auto",
+        }}
+      >
+{log}
+      </pre>
     </main>
   );
 }
