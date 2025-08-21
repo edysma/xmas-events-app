@@ -1,13 +1,10 @@
 // lib/bundles.ts
 // Helpers per creare/riusare Posti (Seat Unit) e Biglietti (Bundle) e collegare componenti.
-// Allineato a Admin GraphQL 2024-07/2024-10:
-// - productVariantsBulkCreate variants: [ProductVariantsBulkInput!]!
-// - productVariantRelationshipBulkUpdate input: [ProductVariantRelationshipUpdateInput!]!
-// - inventorySetQuantities (name: "available", reason: "correction")
+// Allineato a Admin GraphQL 2024-07/2024-10
 
 import { adminFetchGQL, getDefaultLocationId } from "@/lib/shopify-admin";
 
-// --- Tipi locali (ASCII only) ---
+// --- Tipi locali ---
 export type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
 export type TicketMode = "unico" | "triple";
 
@@ -35,7 +32,6 @@ type EnsureSeatUnitResult = {
 };
 
 // attenzione: chi chiama può passare "priceTier€" nel payload runtime.
-// Qui la proprietà è quotata per evitare errori TS su "€".
 type EnsureBundleInput = {
   eventHandle: string;
   date: string; // YYYY-MM-DD
@@ -140,7 +136,6 @@ const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ `
     }
   }
 `;
-
 
 // Inventario: payload corretto (input = InventorySetQuantitiesInput!)
 const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
@@ -460,47 +455,68 @@ export async function setVariantPrices(
 }
 
 /**
- * Collega un Seat Unit (variantId) come componente di una variante Bundle (bundleVariantId).
- * type: "LEADS_TO" se il Bundle rappresenta una prenotazione/posto che "porta a" il seat.
+ * Collega un Seat Unit (seatVariantId) come componente di una variante Bundle (bundleVariantId).
+ * Usa productVariantRelationshipBulkUpdate con:
+ * - parentProductVariantId
+ * - productVariantRelationshipsToCreate / ...ToUpdate
  */
 export async function ensureVariantLeadsToSeat(opts: {
-  bundleVariantId: string;
-  seatVariantId: string;
-  componentQuantity?: number; // es. 2 per Handicap
+  bundleVariantId: string;       // variante del Bundle (parent)
+  seatVariantId: string;         // variante del Seat Unit (component)
+  componentQuantity?: number;    // default 1 (per Handicap passa 2 dal chiamante)
   dryRun?: boolean;
 }) {
-  if (opts.dryRun) {
-    return {
-      ok: true,
-      dryRun: true,
-      relationship: {
-        sourceId: opts.bundleVariantId,
-        targetId: opts.seatVariantId,
-        type: "LEADS_TO",
-        componentQuantity: opts.componentQuantity ?? 1,
-      },
-    };
+  const { bundleVariantId, seatVariantId, componentQuantity = 1, dryRun } = opts;
+
+  if (dryRun) {
+    // niente chiamate reali, ma ritorniamo una shape coerente
+    return { ok: true, created: false, updated: false, qty: componentQuantity };
   }
 
-  const input = [
+  // 1) Prova a CREARE la relazione
+  const createInput = [
     {
-      sourceId: opts.bundleVariantId,
-      targetId: opts.seatVariantId,
-      type: "LEADS_TO",
-      componentQuantity: opts.componentQuantity ?? 1,
+      parentProductVariantId: bundleVariantId,
+      productVariantRelationshipsToCreate: [
+        { id: seatVariantId, quantity: componentQuantity },
+      ],
     },
   ];
 
-  const r = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors: { message: string }[] } }>(
+  let res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
     M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
-    { input }
+    { input: createInput }
   );
-  const errs = (r as any).productVariantRelationshipBulkUpdate?.userErrors || [];
-  if (errs.length) throw new Error(`productVariantRelationshipBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
+  const errs = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
+  if (!errs.length) {
+    // opzionale: attendi visibilità
+    await ensureVariantEventuallyVisible(bundleVariantId);
+    return { ok: true, created: true, updated: false, qty: componentQuantity };
+  }
 
-  // a volte la relazione è "eventualmente consistente": facciamo un breve wait
-  await ensureVariantEventuallyVisible(opts.bundleVariantId);
-  return { ok: true };
+  // 2) Se già esiste, fai UPDATE della quantità
+  const updateInput = [
+    {
+      parentProductVariantId: bundleVariantId,
+      productVariantRelationshipsToUpdate: [
+        { id: seatVariantId, quantity: componentQuantity },
+      ],
+    },
+  ];
+
+  res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
+    M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
+    { input: updateInput }
+  );
+  const errs2 = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
+  if (!errs2.length) {
+    await ensureVariantEventuallyVisible(bundleVariantId);
+    return { ok: true, created: false, updated: true, qty: componentQuantity };
+  }
+
+  // 3) Ancora errore: esponi i messaggi
+  const all = [...errs, ...errs2].map((e) => e?.message || JSON.stringify(e)).join("; ");
+  throw new Error(`Shopify GQL errors (ensureVariantLeadsToSeat): ${all}`);
 }
 
 // Per alcune letture immediate, la nuova variante può non essere ancora "visibile". Attendi fino a 1.5s
