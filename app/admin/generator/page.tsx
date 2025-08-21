@@ -1,4 +1,3 @@
-// app/admin/generator/page.tsx
 'use client';
 
 import React from 'react';
@@ -8,16 +7,17 @@ export default function Page() {
   const [result, setResult] = React.useState<string>('');
   const [loading, setLoading] = React.useState(false);
 
-  async function handlePing() {
+  async function run(path: string, opts?: RequestInit) {
     setLoading(true);
     setResult('');
     try {
-      const res = await fetch('/api/admin-ping', {
+      const res = await fetch(path, {
         method: 'GET',
         headers: {
-          // Non obbligatoria per /api/admin-ping, ma lasciamo lo schema
-          'x-admin-secret': secret || ''
+          'x-admin-secret': secret || '',
+          ...(opts?.headers || {}),
         },
+        ...opts,
       });
       const text = await res.text();
       setResult(text);
@@ -28,6 +28,16 @@ export default function Page() {
     }
   }
 
+  async function handlePing() {
+    // /api/admin-ping NON richiede il secret, ma lasciamo lo stesso header
+    await run('/api/admin-ping');
+  }
+
+  async function handleHolidays() {
+    // /api/admin/holidays RICHIEDE il secret
+    await run('/api/admin/holidays');
+  }
+
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial' }}>
       <h1>Generatore Biglietti (Preview)</h1>
@@ -35,7 +45,7 @@ export default function Page() {
 
       <div style={{ marginTop: 24, display: 'grid', gap: 12, maxWidth: 640 }}>
         <label>
-          <div>Admin Secret (x-admin-secret) — opzionale per questo ping</div>
+          <div>Admin Secret (x-admin-secret)</div>
           <input
             type="password"
             placeholder="incolla qui il segreto"
@@ -45,9 +55,14 @@ export default function Page() {
           />
         </label>
 
-        <button onClick={handlePing} disabled={loading} style={{ padding: '8px 12px' }}>
-          {loading ? 'Pinging…' : 'Ping Admin API'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button onClick={handlePing} disabled={loading} style={{ padding: '8px 12px' }}>
+            {loading ? 'Eseguo…' : 'Ping Admin API'}
+          </button>
+          <button onClick={handleHolidays} disabled={loading || !secret} style={{ padding: '8px 12px' }}>
+            {loading ? 'Eseguo…' : 'Leggi festività'}
+          </button>
+        </div>
 
         <div>
           <div>Risultato:</div>
