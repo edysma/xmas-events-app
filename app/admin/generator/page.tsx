@@ -29,13 +29,16 @@ export default function Page() {
   }
 
   async function handlePing() {
-    // /api/admin-ping NON richiede il secret, ma lasciamo lo stesso header
-    await run('/api/admin-ping');
+    await run('/api/admin-ping'); // non richiede il secret, ma lo inviamo comunque
   }
 
   async function handleHolidays() {
-    // /api/admin/holidays RICHIEDE il secret
-    await run('/api/admin/holidays');
+    await run('/api/admin/holidays'); // richiede il secret
+  }
+
+  // 🔹 NUOVO: locationId
+  async function handleLoc() {
+    await run('/api/admin/loc'); // richiede il secret
   }
 
   return (
@@ -59,8 +62,14 @@ export default function Page() {
           <button onClick={handlePing} disabled={loading} style={{ padding: '8px 12px' }}>
             {loading ? 'Eseguo…' : 'Ping Admin API'}
           </button>
+
           <button onClick={handleHolidays} disabled={loading || !secret} style={{ padding: '8px 12px' }}>
             {loading ? 'Eseguo…' : 'Leggi festività'}
+          </button>
+
+          {/* 🔹 NUOVO bottone */}
+          <button onClick={handleLoc} disabled={loading || !secret} style={{ padding: '8px 12px' }}>
+            {loading ? 'Eseguo…' : 'Leggi Location ID'}
           </button>
         </div>
 
