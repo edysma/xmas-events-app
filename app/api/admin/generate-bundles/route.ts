@@ -6,7 +6,7 @@ import {
   ensureBundle,
   setVariantPrices,
   ensureVariantLeadsToSeat,
-  ensureInventory, // <-- aggiunto
+  ensureInventory,
 } from "@/lib/bundles";
 
 import type {
@@ -21,7 +21,7 @@ import type {
 
 const TZ = "Europe/Rome";
 
-// ---------------- utils date/day ----------------
+/* ---------------- utils date/day ---------------- */
 
 function listDates(start: string, end: string): string[] {
   const out: string[] = [];
@@ -42,13 +42,7 @@ function weekdayRome(date: string): number {
     .format(new Date(date + "T12:00:00Z"))
     .toLowerCase();
   const map: Record<string, number> = {
-    lun: 1,
-    mar: 2,
-    mer: 3,
-    gio: 4,
-    ven: 5,
-    sab: 6,
-    dom: 7,
+    lun: 1, mar: 2, mer: 3, gio: 4, ven: 5, sab: 6, dom: 7,
   };
   return map[name] ?? 0;
 }
@@ -76,7 +70,7 @@ function dayTypeOf(date: string, holidays: Set<string>): DayType {
   return "weekday";
 }
 
-// ---------------- pricing helpers ----------------
+/* ---------------- pricing helpers ---------------- */
 
 function pickTierForDate(
   date: string,
@@ -118,7 +112,8 @@ function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
   return undefined;
 }
 
-// ---------------- route ----------------
+/* ---------------- helpers: FEED ---------------- */
+
 async function previewFromFeed(req: NextRequest, body: any) {
   const origin = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
@@ -130,9 +125,7 @@ async function previewFromFeed(req: NextRequest, body: any) {
   u.searchParams.set("source", body.source ?? "manual");
 
   const res = await fetch(u.toString(), {
-    headers: {
-      "x-admin-secret": req.headers.get("x-admin-secret") || "",
-    },
+    headers: { "x-admin-secret": req.headers.get("x-admin-secret") || "" },
     cache: "no-store",
   });
   if (!res.ok) {
@@ -141,26 +134,25 @@ async function previewFromFeed(req: NextRequest, body: any) {
   }
   const feed = await res.json();
 
-  // Normalizza in preview minimale
-  const preview = [];
+  const preview: Array<{
+    date: string;
+    time: string;
+    dayType: string | null;
+    type?: string;
+    bundleVariantIdGid?: string;
+  }> = [];
   const warnings: string[] = [];
+
   if (Array.isArray(feed?.events)) {
     for (const d of feed.events) {
       const date = String(d?.date || "").slice(0, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        warnings.push(`Giorno ignorato: date non valida "${d?.date}"`);
-        continue;
-      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { warnings.push(`Giorno ignorato: date non valida "${d?.date}"`); continue; }
       const slots = Array.isArray(d?.slots) ? d.slots : [];
       for (const s of slots) {
         const time = String(s?.time || "").slice(0, 5);
-        if (!/^\d{2}:\d{2}$/.test(time)) {
-          warnings.push(`Slot ignorato: time non valido "${s?.time}" (${date})`);
-          continue;
-        }
+        if (!/^\d{2}:\d{2}$/.test(time)) { warnings.push(`Slot ignorato: time non valido "${s?.time}" (${date})`); continue; }
         const dayType = s?.day_type || s?.dayType || null;
 
-        // Mappa le tre tipologie se presenti
         const rows = [
           { type: "Adulto",   gid: s?.bundleVariantId_adulto },
           { type: "Bambino",  gid: s?.bundleVariantId_bambino },
@@ -169,24 +161,11 @@ async function previewFromFeed(req: NextRequest, body: any) {
         let pushed = 0;
         for (const r of rows) {
           if (r.gid) {
-            preview.push({
-              date,
-              time,
-              dayType,
-              type: r.type,
-              bundleVariantIdGid: r.gid,
-            });
+            preview.push({ date, time, dayType, type: r.type, bundleVariantIdGid: r.gid });
             pushed++;
           }
         }
-        if (!pushed) {
-          preview.push({
-            date,
-            time,
-            dayType,
-            type: "Biglietto unico",
-          });
-        }
+        if (!pushed) preview.push({ date, time, dayType, type: "Biglietto unico" });
       }
     }
   } else {
@@ -194,15 +173,11 @@ async function previewFromFeed(req: NextRequest, body: any) {
   }
 
   return NextResponse.json(
-    {
-      ok: true,
-      summary: { seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 },
-      preview,
-      warnings,
-    },
+    { ok: true, summary: { seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 }, preview, warnings },
     { status: 200 }
   );
 }
+
 async function generateFromFeed(req: NextRequest, body: any) {
   // Validazioni minime per creazione reale
   if (body.dryRun !== false) {
@@ -249,6 +224,10 @@ async function generateFromFeed(req: NextRequest, body: any) {
   let seatsCreated = 0;
   let bundlesCreated = 0;
   let variantsCreated = 0;
+  let inventoryAdjusted = 0;
+  let relationshipsUpserted = 0;
+  let pricesUpdated = 0;
+
   const preview: any[] = [];
   const warnings: string[] = [];
 
@@ -289,8 +268,9 @@ async function generateFromFeed(req: NextRequest, body: any) {
       await ensureInventory({
         variantId: seat.variantId, locationId: locationId ?? undefined, quantity: body.capacityPerSlot, dryRun: false,
       });
+      inventoryAdjusted++;
 
-      // modalità: sempre triple se dal feed (Adulto/Bambino/Handicap)
+      // modalità: dal feed impostiamo "triple" (Adulto/Bambino/Handicap)
       const bundle = await ensureBundle({
         eventHandle, date, time, titleBase: eventHandle, templateSuffix, tags, description,
         dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false,
@@ -309,6 +289,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
           componentQuantity: qty,
           dryRun: false,
         });
+        relationshipsUpserted++;
       }
 
       // prezzi
@@ -319,9 +300,10 @@ async function generateFromFeed(req: NextRequest, body: any) {
 
       if (Object.keys(pricesToSet).length) {
         await setVariantPrices(bundle.productId, pricesToSet);
+        pricesUpdated += Object.keys(pricesToSet).length;
       }
 
-      // preview breve
+      // preview breve (solo primi 10)
       if (preview.length < 10) {
         preview.push({
           date, time, dayType: dt,
@@ -334,11 +316,24 @@ async function generateFromFeed(req: NextRequest, body: any) {
   }
 
   return NextResponse.json(
-    { ok: true, summary: { seatsCreated, bundlesCreated, variantsCreated }, preview, warnings },
+    {
+      ok: true,
+      summary: {
+        seatsCreated,
+        bundlesCreated,
+        variantsCreated,
+        inventoryAdjusted,
+        relationshipsUpserted,
+        pricesUpdated,
+      },
+      preview,
+      warnings,
+    },
     { status: 200 }
   );
 }
 
+/* ---------------- route: POST ---------------- */
 
 export async function POST(req: NextRequest) {
   try {
@@ -360,26 +355,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
     }
 
-    // Supporto feed: se arrivano month+collection
-const anyBody = body as any;
-if (anyBody?.month && anyBody?.collection) {
-  // dryRun true => solo preview; dryRun false => creazione reale
-  if (anyBody.dryRun === false) {
-    return await generateFromFeed(req, anyBody);
-  }
-  return await previewFromFeed(req, anyBody);
-}
+    // Se arrivano month+collection: feed (preview o creazione)
+    const anyBody = body as any;
+    if (anyBody?.month && anyBody?.collection) {
+      if (anyBody.dryRun === false) {
+        return await generateFromFeed(req, anyBody);
+      }
+      return await previewFromFeed(req, anyBody);
+    }
 
+    // Altrimenti accettiamo solo source:"manual"
+    if (body.source !== "manual") {
+      return NextResponse.json(
+        { ok: false, error: "source_not_supported_yet", detail: 'Usa {"source":"manual"} oppure passa month+collection per il feed' },
+        { status: 400 }
+      );
+    }
 
-
-// Altrimenti accettiamo solo source:"manual" (comportamento esistente)
-if (body.source !== "manual") {
-  return NextResponse.json(
-    { ok: false, error: "source_not_supported_yet", detail: 'Usa {"source":"manual"} oppure passa month+collection per il preview da feed' },
-    { status: 400 }
-  );
-}
-
+    /* ------- ramo MANUAL esistente ------- */
 
     const input = body as ManualInput & {
       dryRun?: boolean;
@@ -402,7 +395,6 @@ if (body.source !== "manual") {
     const preview: PreviewItem[] = [];
     const warningsGlobal: string[] = [];
 
-    // Nota: per ora i contatori "created" rimangono 0 (riempiremo in seguito se serve)
     let seatsCreated = 0;
     let bundlesCreated = 0;
     let variantsCreated = 0;
@@ -418,13 +410,7 @@ if (body.source !== "manual") {
       const mode = decideMode(tier);
 
       for (const time of slots) {
-        const item: PreviewItem = {
-          date,
-          time,
-          dayType: dt,
-          "pricePlan€": tier,
-          mode: mode as any,
-        };
+        const item: PreviewItem = { date, time, dayType: dt, "pricePlan€": tier, mode: mode as any };
 
         if (!tier || !mode) {
           item.warnings = item.warnings ?? [];
@@ -434,21 +420,13 @@ if (body.source !== "manual") {
           continue;
         }
 
-        // ---------- Seat Unit ----------
-const seat = await ensureSeatUnit({
-  date,
-  time,
-  titleBase: input.eventHandle,
-  tags,
-  description,
-  templateSuffix,
-  dryRun,
-});
-// incrementa contatori (solo se non è dryRun e se creato ora)
-if (!dryRun && seat.created) seatsCreated++;
+        // Seat Unit
+        const seat = await ensureSeatUnit({
+          date, time, titleBase: input.eventHandle, tags, description, templateSuffix, dryRun,
+        });
+        if (!dryRun && seat.created) seatsCreated++;
 
-
-        // stock iniziale
+        // Stock iniziale
         await ensureInventory({
           variantId: seat.variantId,
           locationId: input.locationId,
@@ -456,51 +434,36 @@ if (!dryRun && seat.created) seatsCreated++;
           dryRun,
         });
 
-       // ---------- Bundle ----------
-const bundle = await ensureBundle({
-  eventHandle: input.eventHandle,
-  date,
-  time,
-  titleBase: input.eventHandle,
-  templateSuffix,
-  tags,
-  description,
-  dayType: dt,
-  mode,
-  "priceTier€": tier,
-  dryRun,
-});
-// incrementa contatori (solo se non è dryRun)
-if (!dryRun) {
-  if (bundle.createdProduct) bundlesCreated++;
-  if (typeof bundle.createdVariants === "number") {
-    variantsCreated += bundle.createdVariants;
-  }
-}
+        // Bundle
+        const bundle = await ensureBundle({
+          eventHandle: input.eventHandle,
+          date, time, titleBase: input.eventHandle,
+          templateSuffix, tags, description,
+          dayType: dt, mode, "priceTier€": tier,
+          dryRun,
+        });
+        if (!dryRun) {
+          if (bundle.createdProduct) bundlesCreated++;
+          if (typeof bundle.createdVariants === "number") variantsCreated += bundle.createdVariants;
+        }
 
-
-        // ---------- Componenti (collega variante seat) ----------
-        // qty 1 per tutte, tranne handicap = 2
-        const compOps: (["unico" | "adulto" | "bambino" | "handicap", number])[] =
-          mode === "unico"
-            ? [["unico", 1]]
-            : [["adulto", 1], ["bambino", 1], ["handicap", 2]];
-
+        // Componenti (collega variante seat) — qty 1 per tutte, handicap = 2
+        const compOps: (["unico"|"adulto"|"bambino"|"handicap", number])[] =
+          mode === "unico" ? [["unico", 1]] : [["adulto", 1], ["bambino", 1], ["handicap", 2]];
         if (!dryRun) {
           for (const [k, qty] of compOps) {
             const parentVariantId = bundle.variantMap[k];
             if (!parentVariantId) continue;
             await ensureVariantLeadsToSeat({
-  bundleVariantId: parentVariantId,
-  seatVariantId: seat.variantId,
-  componentQuantity: qty,
-  dryRun: input.dryRun,
-});
-
+              bundleVariantId: parentVariantId,
+              seatVariantId: seat.variantId,
+              componentQuantity: qty,
+              dryRun: false,
+            });
           }
         }
 
-        // ---------- Prezzi ----------
+        // Prezzi
         if (!dryRun) {
           const pricesToSet: Record<string, number | undefined> = {};
           if (mode === "unico") {
@@ -512,12 +475,12 @@ if (!dryRun) {
             if (bambino && typeof tier.bambino === "number") pricesToSet[bambino] = tier.bambino;
             if (handicap && typeof tier.handicap === "number") pricesToSet[handicap] = tier.handicap;
           }
-         if (Object.keys(pricesToSet).length) {
-  await setVariantPrices(bundle.productId, pricesToSet);
-}
+          if (Object.keys(pricesToSet).length) {
+            await setVariantPrices(bundle.productId, pricesToSet);
+          }
         }
 
-        // ---------- Preview ----------
+        // Preview (solo primi 10)
         if (preview.length < 10) {
           item.seatProductId = seat.productId;
           item.bundleProductId = bundle.productId;
@@ -545,4 +508,20 @@ if (!dryRun) {
       { status: 500 }
     );
   }
+}
+
+/* ---------------- CORS (aperto per test) ---------------- */
+
+export async function OPTIONS() {
+  return NextResponse.json(
+    { ok: true },
+    {
+      status: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type, x-admin-secret",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+      },
+    }
+  );
 }
