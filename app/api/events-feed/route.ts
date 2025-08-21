@@ -1,15 +1,36 @@
 // app/api/events-feed/route.ts
+
+// ================== CORS (origini consentite) ==================
 import { NextRequest, NextResponse } from "next/server";
+
+const ALLOWED = (process.env.NEXT_PUBLIC_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function corsify(resp: NextResponse, origin?: string) {
+  if (origin && ALLOWED.includes(origin)) {
+    resp.headers.set("Access-Control-Allow-Origin", origin);
+    resp.headers.append("Vary", "Origin");
+  }
+  resp.headers.set("Access-Control-Allow-Methods", "GET,OPTIONS");
+  resp.headers.set("Access-Control-Allow-Headers", "Content-Type");
+  return resp;
+}
+
+// Preflight
+export function OPTIONS(request: Request) {
+  const origin = request.headers.get("origin") || "";
+  return corsify(new NextResponse(null, { status: 204 }), origin);
+}
 
 // Evita caching aggressivo su Vercel/Next per questa rotta pubblica
 export const dynamic = "force-dynamic";
 
-/* ---------------- Storefront GQL client (pubblico) ---------------- */
-
+// ================== Storefront GQL client (pubblico) ==================
 async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<T> {
   const domain = process.env.SHOPIFY_STORE_DOMAIN!;
   const token = process.env.SHOPIFY_STOREFRONT_ACCESS_TOKEN!;
-
   if (!domain || !token) throw new Error("Missing Storefront envs");
 
   const res = await fetch(`https://${domain}/api/2024-07/graphql.json`, {
@@ -33,7 +54,6 @@ async function sfGQL<T>(query: string, variables: Record<string, any>): Promise<
  * Accetta sia EN DASH "—" sia trattino "-".
  */
 function parseTitleForDateTime(title: string): { date: string; time: string } | null {
-  // Accetta sia YYYY-MM-DD che DD/MM/YYYY dopo il "—" (o "-") + HH:mm
   const m =
     title.match(/—\s*([0-9/ -]{10})\s+(\d{2}:\d{2})$/) ||
     title.match(/-\s*([0-9/ -]{10})\s+(\d{2}:\d{2})$/);
@@ -77,8 +97,7 @@ function dayTypeOf(date: string): "weekday" | "friday" | "saturday" | "sunday" |
   return "weekday";
 }
 
-/* ---------------- GQL ---------------- */
-
+// ================== GQL ==================
 const Q_COLLECTION_PRODUCTS = /* GraphQL */ `
   query CollectionByHandle($handle: String!, $cursor: String) {
     collection(handle: $handle) {
@@ -100,7 +119,6 @@ const Q_COLLECTION_PRODUCTS = /* GraphQL */ `
   }
 `;
 
-/* Esplicito i tipi per evitare errori TS */
 type SfCollectionProductsResp = {
   collection: {
     products: {
@@ -118,7 +136,6 @@ type SfCollectionProductsResp = {
   } | null;
 };
 
-/* Dalla lista varianti capisco se è "unico" o "triple" e mappo gli ID */
 function extractVariantMap(variants: Array<{ title: string; id: string }>) {
   const out: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
     unico: undefined,
@@ -138,32 +155,20 @@ function extractVariantMap(variants: Array<{ title: string; id: string }>) {
   return { mode, map: out };
 }
 
-/* ---------------- CORS helper ---------------- */
-
-function withCORS(res: NextResponse) {
-  res.headers.set("Access-Control-Allow-Origin", "*");
-  res.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.headers.set("Access-Control-Allow-Headers", "*");
-  return res;
-}
-
-export async function OPTIONS() {
-  return withCORS(new NextResponse(null, { status: 204 }));
-}
-
-/* ---------------- Route pubblica ---------------- */
-
+// ================== Route pubblica ==================
 export async function GET(req: NextRequest) {
+  const origin = req.headers.get("origin") || "";
+
   try {
     const { searchParams } = new URL(req.url);
     const month = searchParams.get("month") || "";
     const collection = searchParams.get("collection") || "";
 
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-      return withCORS(NextResponse.json({ ok: false, error: "invalid_month" }, { status: 400 }));
+      return corsify(NextResponse.json({ ok: false, error: "invalid_month" }, { status: 400 }), origin);
     }
     if (!collection) {
-      return withCORS(NextResponse.json({ ok: false, error: "missing_collection" }, { status: 400 }));
+      return corsify(NextResponse.json({ ok: false, error: "missing_collection" }, { status: 400 }), origin);
     }
 
     // 1) Carico i prodotti della collezione dal canale pubblico (Storefront)
@@ -237,10 +242,14 @@ export async function GET(req: NextRequest) {
       .sort()
       .map((date) => ({ date, slots: byDate[date].sort((a, b) => a.time.localeCompare(b.time)) }));
 
-    return withCORS(NextResponse.json({ month, events }, { status: 200 }));
+    return corsify(NextResponse.json({ month, events }, { status: 200 }), origin);
   } catch (err: any) {
-    return withCORS(
-      NextResponse.json({ month: "", events: [], error: String(err?.message || err) }, { status: 500 })
+    return corsify(
+      NextResponse.json(
+        { month: "", events: [], error: String(err?.message || err) },
+        { status: 500 }
+      ),
+      origin
     );
   }
 }
