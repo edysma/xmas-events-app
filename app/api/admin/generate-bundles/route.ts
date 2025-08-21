@@ -119,6 +119,91 @@ function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
 }
 
 // ---------------- route ----------------
+async function previewFromFeed(req: NextRequest, body: any) {
+  const origin = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : `${req.headers.get("x-forwarded-proto") ?? "https"}://${req.headers.get("host")}`;
+
+  const u = new URL("/api/admin/events-feed-bundles", origin);
+  u.searchParams.set("month", body.month);
+  u.searchParams.set("collection", body.collection);
+  u.searchParams.set("source", body.source ?? "manual");
+
+  const res = await fetch(u.toString(), {
+    headers: {
+      "x-admin-secret": req.headers.get("x-admin-secret") || "",
+    },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`feed error: ${res.status} ${t}`);
+  }
+  const feed = await res.json();
+
+  // Normalizza in preview minimale
+  const preview = [];
+  const warnings: string[] = [];
+  if (Array.isArray(feed?.events)) {
+    for (const d of feed.events) {
+      const date = String(d?.date || "").slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        warnings.push(`Giorno ignorato: date non valida "${d?.date}"`);
+        continue;
+      }
+      const slots = Array.isArray(d?.slots) ? d.slots : [];
+      for (const s of slots) {
+        const time = String(s?.time || "").slice(0, 5);
+        if (!/^\d{2}:\d{2}$/.test(time)) {
+          warnings.push(`Slot ignorato: time non valido "${s?.time}" (${date})`);
+          continue;
+        }
+        const dayType = s?.day_type || s?.dayType || null;
+
+        // Mappa le tre tipologie se presenti
+        const rows = [
+          { type: "Adulto",   gid: s?.bundleVariantId_adulto },
+          { type: "Bambino",  gid: s?.bundleVariantId_bambino },
+          { type: "Handicap", gid: s?.bundleVariantId_handicap },
+        ];
+        let pushed = 0;
+        for (const r of rows) {
+          if (r.gid) {
+            preview.push({
+              date,
+              time,
+              dayType,
+              type: r.type,
+              bundleVariantIdGid: r.gid,
+            });
+            pushed++;
+          }
+        }
+        if (!pushed) {
+          preview.push({
+            date,
+            time,
+            dayType,
+            type: "Biglietto unico",
+          });
+        }
+      }
+    }
+  } else {
+    warnings.push("Feed vuoto o in formato inatteso.");
+  }
+
+  return NextResponse.json(
+    {
+      ok: true,
+      summary: { seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 },
+      preview,
+      warnings,
+    },
+    { status: 200 }
+  );
+}
+
 
 export async function POST(req: NextRequest) {
   try {
@@ -140,12 +225,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
     }
 
-    if (body.source !== "manual") {
-      return NextResponse.json(
-        { ok: false, error: "source_not_supported_yet", detail: 'Per ora usa {"source":"manual"}' },
-        { status: 400 }
-      );
-    }
+    // Supporto feed preview: se arrivano month+collection → anteprima dal feed (nessuna creazione)
+if (body?.month && body?.collection) {
+  return await previewFromFeed(req, body);
+}
+
+// Altrimenti accettiamo solo source:"manual" (comportamento esistente)
+if (body.source !== "manual") {
+  return NextResponse.json(
+    { ok: false, error: "source_not_supported_yet", detail: 'Usa {"source":"manual"} oppure passa month+collection per il preview da feed' },
+    { status: 400 }
+  );
+}
+
 
     const input = body as ManualInput & {
       dryRun?: boolean;
