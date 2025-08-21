@@ -441,14 +441,18 @@ export async function setVariantPrices(
   if (!variantsInput.length) return { ok: true };
 
   const M = /* GraphQL */ `
-    mutation PVUpdatePrice($input: [ProductVariantInput!]!) {
-      productVariantsBulkUpdate(productVariants: $input) {
-        productVariants { id price { amount currencyCode } }
-        userErrors { field message code }
-      }
+  mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      userErrors { field message code }
     }
-  `;
-  const r = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors: { message: string }[] } }>(M, { input: variantsInput });
+  }
+`;
+
+  const r = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors: { message: string }[] } }>(M, {
+  productId,
+  variants: variantsInput,
+});
+
   const errs = (r as any).productVariantsBulkUpdate?.userErrors || [];
   if (errs.length) throw new Error(`productVariantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
   return { ok: true };
