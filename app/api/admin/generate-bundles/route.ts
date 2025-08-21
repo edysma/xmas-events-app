@@ -201,15 +201,18 @@ export async function POST(req: NextRequest) {
         }
 
         // ---------- Seat Unit ----------
-        const seat = await ensureSeatUnit({
-          date,
-          time,
-          titleBase: input.eventHandle,
-          tags,
-          description,
-          templateSuffix,
-          dryRun,
-        });
+const seat = await ensureSeatUnit({
+  date,
+  time,
+  titleBase: input.eventHandle,
+  tags,
+  description,
+  templateSuffix,
+  dryRun,
+});
+// incrementa contatori (solo se non è dryRun e se creato ora)
+if (!dryRun && seat.created) seatsCreated++;
+
 
         // stock iniziale
         await ensureInventory({
@@ -219,20 +222,28 @@ export async function POST(req: NextRequest) {
           dryRun,
         });
 
-        // ---------- Bundle ----------
-        const bundle = await ensureBundle({
-          eventHandle: input.eventHandle,
-          date,
-          time,
-          titleBase: input.eventHandle,
-          templateSuffix,
-          tags,
-          description,
-          dayType: dt,
-          mode,
-          "priceTier€": tier,
-          dryRun,
-        });
+       // ---------- Bundle ----------
+const bundle = await ensureBundle({
+  eventHandle: input.eventHandle,
+  date,
+  time,
+  titleBase: input.eventHandle,
+  templateSuffix,
+  tags,
+  description,
+  dayType: dt,
+  mode,
+  "priceTier€": tier,
+  dryRun,
+});
+// incrementa contatori (solo se non è dryRun)
+if (!dryRun) {
+  if (bundle.createdProduct) bundlesCreated++;
+  if (typeof bundle.createdVariants === "number") {
+    variantsCreated += bundle.createdVariants;
+  }
+}
+
 
         // ---------- Componenti (collega variante seat) ----------
         // qty 1 per tutte, tranne handicap = 2
