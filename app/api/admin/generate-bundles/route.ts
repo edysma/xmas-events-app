@@ -226,9 +226,11 @@ export async function POST(req: NextRequest) {
     }
 
     // Supporto feed preview: se arrivano month+collection → anteprima dal feed (nessuna creazione)
-if (body?.month && body?.collection) {
-  return await previewFromFeed(req, body);
+const anyBody = body as any;
+if (anyBody?.month && anyBody?.collection) {
+  return await previewFromFeed(req, anyBody);
 }
+
 
 // Altrimenti accettiamo solo source:"manual" (comportamento esistente)
 if (body.source !== "manual") {
