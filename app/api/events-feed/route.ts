@@ -1,27 +1,18 @@
 // app/api/events-feed/route.ts
-
-// ================== CORS (origini consentite) ==================
 import { NextRequest, NextResponse } from "next/server";
 
-const ALLOWED = (process.env.NEXT_PUBLIC_ALLOWED_ORIGINS || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
-
-function corsify(resp: NextResponse, origin?: string) {
-  if (origin && ALLOWED.includes(origin)) {
-    resp.headers.set("Access-Control-Allow-Origin", origin);
-    resp.headers.append("Vary", "Origin");
-  }
+// =============== CORS: permetti TUTTE le origini (sblocco rapido) ===============
+function corsify(resp: NextResponse) {
+  resp.headers.set("Access-Control-Allow-Origin", "*");          // nessun credential
   resp.headers.set("Access-Control-Allow-Methods", "GET,OPTIONS");
   resp.headers.set("Access-Control-Allow-Headers", "Content-Type");
+  resp.headers.append("Vary", "Origin");
   return resp;
 }
 
 // Preflight
-export function OPTIONS(request: Request) {
-  const origin = request.headers.get("origin") || "";
-  return corsify(new NextResponse(null, { status: 204 }), origin);
+export function OPTIONS() {
+  return corsify(new NextResponse(null, { status: 204 }));
 }
 
 // Evita caching aggressivo su Vercel/Next per questa rotta pubblica
@@ -157,18 +148,16 @@ function extractVariantMap(variants: Array<{ title: string; id: string }>) {
 
 // ================== Route pubblica ==================
 export async function GET(req: NextRequest) {
-  const origin = req.headers.get("origin") || "";
-
   try {
     const { searchParams } = new URL(req.url);
     const month = searchParams.get("month") || "";
     const collection = searchParams.get("collection") || "";
 
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-      return corsify(NextResponse.json({ ok: false, error: "invalid_month" }, { status: 400 }), origin);
+      return corsify(NextResponse.json({ ok: false, error: "invalid_month" }, { status: 400 }));
     }
     if (!collection) {
-      return corsify(NextResponse.json({ ok: false, error: "missing_collection" }, { status: 400 }), origin);
+      return corsify(NextResponse.json({ ok: false, error: "missing_collection" }, { status: 400 }));
     }
 
     // 1) Carico i prodotti della collezione dal canale pubblico (Storefront)
@@ -242,14 +231,10 @@ export async function GET(req: NextRequest) {
       .sort()
       .map((date) => ({ date, slots: byDate[date].sort((a, b) => a.time.localeCompare(b.time)) }));
 
-    return corsify(NextResponse.json({ month, events }, { status: 200 }), origin);
+    return corsify(NextResponse.json({ month, events }, { status: 200 }));
   } catch (err: any) {
     return corsify(
-      NextResponse.json(
-        { month: "", events: [], error: String(err?.message || err) },
-        { status: 500 }
-      ),
-      origin
+      NextResponse.json({ month: "", events: [], error: String(err?.message || err) }, { status: 500 })
     );
   }
 }
