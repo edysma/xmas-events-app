@@ -2,11 +2,7 @@
 // Helpers per creare/riusare Posti (Seat Unit) e Biglietti (Bundle) e collegare componenti.
 // Allineato a Admin GraphQL 2024-07/2024-10
 
-import {
-  adminFetchGQL,
-  getDefaultLocationId,
-  publishProductToPublication, // <-- usiamo l'helper centralizzato
-} from "@/lib/shopify-admin";
+import { adminFetchGQL, getDefaultLocationId, publishProductToPublication } from "@/lib/shopify-admin";
 
 // --- Tipi locali ---
 export type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
@@ -187,9 +183,14 @@ function getOnlineStorePublicationIdOrThrow(): string {
 }
 
 async function publishProductToOnlineStore(productId: string, _pubId?: string) {
-  // 🔧 FIX: publishProductToPublication accetta **solo** (productId)
-  await publishProductToPublication(productId);
+  // Passa i parametri nel formato oggetto richiesto dall'helper
+  if (_pubId) {
+    await publishProductToPublication({ productId, publicationId: _pubId });
+  } else {
+    await publishProductToPublication({ productId });
+  }
 }
+
 
 async function createProductActive(opts: {
   title: string;
