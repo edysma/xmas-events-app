@@ -1,4 +1,5 @@
 // app/api/admin/generate-bundles/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import { adminFetchGQL, getShopPublicHolidays, publishProductToPublication } from "@/lib/shopify-admin";
 import {
   ensureSeatUnit,
@@ -28,7 +29,7 @@ function listDates(start: string, end: string): string[] {
   const stop = new Date(end + "T00:00:00Z");
   while (d.getTime() <= stop.getTime()) {
     out.push(d.toISOString().slice(0, 10));
-  d.setUTCDate(d.getUTCDate() + 1);
+    d.setUTCDate(d.getUTCDate() + 1);
   }
   return out;
 }
@@ -80,26 +81,26 @@ function pickTierForDate(
 ): PriceTierEuro | undefined {
   if (exceptionsByDate && exceptionsByDate[date]) return exceptionsByDate[date];
 
-  if (dt === "holiday") return prices.holiday;
-  if (dt === "saturday") return prices.saturday;
-  if (dt === "sunday") return prices.sunday;
+  if (dt === "holiday") return (prices as any).holiday;
+  if (dt === "saturday") return (prices as any).saturday;
+  if (dt === "sunday") return (prices as any).sunday;
 
   if (dt === "friday") {
     if (fridayAsWeekend) {
-      return prices.saturday ?? prices.sunday ?? prices.holiday ?? prices.feriali;
+      return (prices as any).saturday ?? (prices as any).sunday ?? (prices as any).holiday ?? (prices as any).feriali;
     }
-    return prices.friday ?? prices.feriali;
+    return (prices as any).friday ?? (prices as any).feriali;
   }
 
   const wk = weekdayKey(date);
-  const perDay = prices.feriali?.perDay;
+  const perDay = (prices as any).feriali?.perDay;
   if (perDay) {
     if (wk === "mon" && perDay.mon) return perDay.mon;
     if (wk === "tue" && perDay.tue) return perDay.tue;
     if (wk === "wed" && perDay.wed) return perDay.wed;
     if (wk === "thu" && perDay.thu) return perDay.thu;
   }
-  return prices.feriali;
+  return (prices as any).feriali;
 }
 
 function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
@@ -111,7 +112,7 @@ function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
   return undefined;
 }
 
-/* ---------------- helpers: publish/activate ---------------- */
+/* ---------------- helpers: activate (no publish local) ---------------- */
 
 // Product -> ACTIVE
 const M_PRODUCT_ACTIVATE = /* GraphQL */ `
@@ -328,9 +329,9 @@ async function generateFromFeed(req: NextRequest, body: any) {
 
       // activate + publish (Seat + Bundle)
       await activateProduct(seat.productId);
-      await publishProductToPublication(seat.productId, publicationId);
+      await publishProductToPublication({ productId: seat.productId, publicationId });
       await activateProduct(bundle.productId);
-      await publishProductToPublication(bundle.productId, publicationId);
+      await publishProductToPublication({ productId: bundle.productId, publicationId });
 
       // preview breve (solo primi 10)
       if (preview.length < 10) {
@@ -517,9 +518,9 @@ export async function POST(req: NextRequest) {
         // Activate + Publish (quando non è dry-run)
         if (!dryRun && publicationId) {
           await activateProduct(seat.productId);
-          await publishProduct(seat.productId, publicationId);
+          await publishProductToPublication({ productId: seat.productId, publicationId });
           await activateProduct(bundle.productId);
-          await publishProduct(bundle.productId, publicationId);
+          await publishProductToPublication({ productId: bundle.productId, publicationId });
         }
 
         // Preview (solo primi 10)
