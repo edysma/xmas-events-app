@@ -2,15 +2,14 @@
 
 import { useMemo, useState, useEffect } from "react";
 
-/**
- * UI target (solo interfaccia). Nessun accesso a localStorage / window.
- * La logica di chiamata API verrà aggiunta nello Step 3.
- */
+const LS_ADMIN_SECRET = "sinflora_admin_secret";
 
 export default function AdminGeneratorUIV2() {
   // -----------------------------
   // Stato principale
   // -----------------------------
+  const [adminSecret, setAdminSecret] = useState(""); // Admin Secret (persistente)
+
   const [dateStart, setDateStart] = useState("");
   const [dateEnd, setDateEnd] = useState("");
   const [excluded, setExcluded] = useState<string[]>([]);
@@ -72,6 +71,26 @@ export default function AdminGeneratorUIV2() {
   const [tags, setTags] = useState("");
 
   // -----------------------------
+  // Persistenza Admin Secret
+  // -----------------------------
+  useEffect(() => {
+    try {
+      const v = window.localStorage.getItem(LS_ADMIN_SECRET);
+      if (v) setAdminSecret(v);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LS_ADMIN_SECRET, adminSecret ?? "");
+    } catch {
+      // ignore
+    }
+  }, [adminSecret]);
+
+  // -----------------------------
   // Helpers date/orari
   // -----------------------------
   function listDatesBetween(start: string, end: string): string[] {
@@ -118,7 +137,8 @@ export default function AdminGeneratorUIV2() {
     const invalid: string[] = [];
     const valid: string[] = [];
     for (const t of deduped) {
-      if (isValidHHMM(t)) valid.push(t); else invalid.push(t);
+      if (isValidHHMM(t)) valid.push(t);
+      else invalid.push(t);
     }
     const sortedValid = sortHHMM(valid);
     return { valid: sortedValid, invalid, duplicatesRemoved: raw.length - deduped.length };
@@ -197,10 +217,19 @@ export default function AdminGeneratorUIV2() {
       <div className="max-w-6xl mx-auto space-y-6">
         <header className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">Sinflora — Admin Generator (UI v2)</h1>
-          <label className="text-sm inline-flex items-center gap-2">
-            <input className="size-4" type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
-            Dry‑run
-          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={adminSecret}
+              onChange={(e) => setAdminSecret(e.target.value)}
+              className="rounded-xl border px-3 py-2 w-64"
+              placeholder="Admin secret"
+            />
+            <label className="text-sm inline-flex items-center gap-2">
+              <input className="size-4" type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
+              Dry‑run
+            </label>
+          </div>
         </header>
 
         <section className="grid lg:grid-cols-2 gap-6">
@@ -361,16 +390,44 @@ export default function AdminGeneratorUIV2() {
               ) : (
                 <div className="grid md:grid-cols-2 gap-3">
                   <DayCard title="Lunedì">
-                    <SectionPricesInner unico={ferMonUnico} setUnico={setFerMonUnico} unicoPrice={ferMonUnicoPrice} setUnicoPrice={setFerMonUnicoPrice} triple={ferMonTriple} setTriple={setFerMonTriple} />
+                    <SectionPricesInner
+                      unico={ferMonUnico}
+                      setUnico={setFerMonUnico}
+                      unicoPrice={ferMonUnicoPrice}
+                      setUnicoPrice={setFerMonUnicoPrice}
+                      triple={ferMonTriple}
+                      setTriple={setFerMonTriple}
+                    />
                   </DayCard>
                   <DayCard title="Martedì">
-                    <SectionPricesInner unico={ferTueUnico} setUnico={setFerTueUnico} unicoPrice={ferTueUnicoPrice} setUnicoPrice={setFerTueUnicoPrice} triple={ferTueTriple} setTriple={setFerTueTriple} />
+                    <SectionPricesInner
+                      unico={ferTueUnico}
+                      setUnico={setFerTueUnico}
+                      unicoPrice={ferTueUnicoPrice}
+                      setUnicoPrice={setFerTueUnicoPrice}
+                      triple={ferTueTriple}
+                      setTriple={setFerTueTriple}
+                    />
                   </DayCard>
                   <DayCard title="Mercoledì">
-                    <SectionPricesInner unico={ferWedUnico} setUnico={setFerWedUnico} unicoPrice={ferWedUnicoPrice} setUnicoPrice={setFerWedUnicoPrice} triple={ferWedTriple} setTriple={setFerWedTriple} />
+                    <SectionPricesInner
+                      unico={ferWedUnico}
+                      setUnico={setFerWedUnico}
+                      unicoPrice={ferWedUnicoPrice}
+                      setUnicoPrice={setFerWedUnicoPrice}
+                      triple={ferWedTriple}
+                      setTriple={setFerWedTriple}
+                    />
                   </DayCard>
                   <DayCard title="Giovedì">
-                    <SectionPricesInner unico={ferThuUnico} setUnico={setFerThuUnico} unicoPrice={ferThuUnicoPrice} setUnicoPrice={setFerThuUnicoPrice} triple={ferThuTriple} setTriple={setFerThuTriple} />
+                    <SectionPricesInner
+                      unico={ferThuUnico}
+                      setUnico={setFerThuUnico}
+                      unicoPrice={ferThuUnicoPrice}
+                      setUnicoPrice={setFerThuUnicoPrice}
+                      triple={ferThuTriple}
+                      setTriple={setFerThuTriple}
+                    />
                   </DayCard>
                 </div>
               )}
@@ -440,7 +497,7 @@ export default function AdminGeneratorUIV2() {
             <p className="text-sm">
               <b>Prodotto:</b>{" "}
               {bundleTitleBase && sampleDate && sampleTime
-                ? `${bundleTitleBase} — ${sampleDate.split("-").reverse().join("/")} ${sampleTime}`
+                ? `${sampleTitle}`
                 : "(compila titolo, date e orari)"}
             </p>
             <p className="text-sm">
