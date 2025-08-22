@@ -70,6 +70,10 @@ export default function AdminGeneratorUIV2() {
   const [desc, setDesc] = useState("");
   const [tags, setTags] = useState("");
 
+  // Loading state per pulsanti
+  const [loadingSeats, setLoadingSeats] = useState(false);
+  const [loadingBundles, setLoadingBundles] = useState(false);
+
   // -----------------------------
   // Persistenza Admin Secret
   // -----------------------------
@@ -108,7 +112,6 @@ export default function AdminGeneratorUIV2() {
   }
   function getDowRome(dateStr: string): number {
     const d = new Date(dateStr + "T12:00:00+01:00");
-    // 0=Dom .. 6=Sab
     return d.getDay();
   }
 
@@ -169,9 +172,9 @@ export default function AdminGeneratorUIV2() {
   function isUnicoForSample(dateStr: string): boolean {
     if (!dateStr) return false;
     const dow = getDowRome(dateStr);
-    if (dow === 6) return satUnico; // sab
-    if (dow === 0) return sunUnico; // dom
-    if (dow === 5) return fridayAsWeekend ? satUnico : friUnico; // ven
+    if (dow === 6) return satUnico;
+    if (dow === 0) return sunUnico;
+    if (dow === 5) return fridayAsWeekend ? satUnico : friUnico;
     if (dow >= 1 && dow <= 4) {
       if (ferSeparate) {
         if (dow === 1) return ferMonUnico;
@@ -179,7 +182,7 @@ export default function AdminGeneratorUIV2() {
         if (dow === 3) return ferWedUnico;
         if (dow === 4) return ferThuUnico;
       }
-      return ferUnico; // generale Lun–Gio
+      return ferUnico;
     }
     return false;
   }
@@ -195,7 +198,76 @@ export default function AdminGeneratorUIV2() {
   }
 
   // -----------------------------
-  // TEST automatici (console) per parser orari
+  // Handlers pulsanti
+  // -----------------------------
+  async function handleCreateSeats() {
+    if (!canRun || !adminSecret) return;
+    setLoadingSeats(true);
+    try {
+      const res = await fetch("/api/admin/generate-seats", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-secret": adminSecret,
+        },
+        body: JSON.stringify({
+          dateStart,
+          dateEnd,
+          excluded,
+          times: timesInfo.valid,
+          productTitleBase,
+          capacityPerSlot,
+          dryRun,
+        }),
+      });
+      const data = await res.json();
+      console.log("Seats result:", data);
+      alert("Creazione posti completata (vedi console per dettagli)");
+    } catch (err) {
+      console.error("Errore creazione posti:", err);
+      alert("Errore durante la creazione dei posti (vedi console)");
+    } finally {
+      setLoadingSeats(false);
+    }
+  }
+
+  async function handleCreateBundles() {
+    if (!canRun || !adminSecret) return;
+    setLoadingBundles(true);
+    try {
+      const res = await fetch("/api/admin/generate-bundles", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-secret": adminSecret,
+        },
+        body: JSON.stringify({
+          dateStart,
+          dateEnd,
+          excluded,
+          times: timesInfo.valid,
+          bundleTitleBase,
+          dryRun,
+          fridayAsWeekend,
+          templateSuffix,
+          imageUrl,
+          desc,
+          tags,
+        }),
+      });
+      const data = await res.json();
+      console.log("Bundles result:", data);
+      alert("Creazione biglietti completata (vedi console per dettagli)");
+    } catch (err) {
+      console.error("Errore creazione biglietti:", err);
+      alert("Errore durante la creazione dei biglietti (vedi console)");
+    } finally {
+      setLoadingBundles(false);
+    }
+  }
+
+  // -----------------------------
+  // TEST automatici parser orari
   // -----------------------------
   useEffect(() => {
     const ok = (name: string, cond: boolean) => console.assert(cond, `Test fallito: ${name}`);
@@ -212,6 +284,9 @@ export default function AdminGeneratorUIV2() {
     ok("bordi", t4.valid.join(",") === "00:00,23:59");
   }, []);
 
+  // -----------------------------
+  // RENDER
+  // -----------------------------
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -227,7 +302,7 @@ export default function AdminGeneratorUIV2() {
             />
             <label className="text-sm inline-flex items-center gap-2">
               <input className="size-4" type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
-              Dry‑run
+              Dry-run
             </label>
           </div>
         </header>
@@ -300,8 +375,12 @@ export default function AdminGeneratorUIV2() {
             </div>
 
             <div className="flex items-center justify-between">
-              <button disabled={!canRun} className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50">
-                Crea posti
+              <button
+                disabled={!canRun || loadingSeats}
+                onClick={handleCreateSeats}
+                className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+              >
+                {loadingSeats ? "Creazione..." : "Crea posti"}
               </button>
               <span className="text-xs text-gray-600">Stima posti: {comboCount || 0}</span>
             </div>
@@ -473,8 +552,12 @@ export default function AdminGeneratorUIV2() {
             </section>
 
             <div className="flex items-center justify-between">
-              <button disabled={!canRun} className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50">
-                Crea biglietti
+              <button
+                disabled={!canRun || loadingBundles}
+                onClick={handleCreateBundles}
+                className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+              >
+                {loadingBundles ? "Creazione..." : "Crea biglietti"}
               </button>
               <span className="text-xs text-gray-600">Stima biglietti: {comboCount || 0}</span>
             </div>
