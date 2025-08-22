@@ -21,14 +21,6 @@ import type {
 
 const TZ = "Europe/Rome";
 
-// ENV (pubblicazione canale + location di default)
-const ONLINE_PUBLICATION_ID =
-  process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || "";
-const DEFAULT_LOCATION_ID =
-  process.env.DEFAULT_LOCATION_ID ||
-  process.env.SHOPIFY_DEFAULT_LOCATION_ID ||
-  "";
-
 /* ---------------- utils date/day ---------------- */
 
 function listDates(start: string, end: string): string[] {
@@ -50,38 +42,22 @@ function weekdayRome(date: string): number {
     .format(new Date(date + "T12:00:00Z"))
     .toLowerCase();
   const map: Record<string, number> = {
-    lun: 1,
-    mar: 2,
-    mer: 3,
-    gio: 4,
-    ven: 5,
-    sab: 6,
-    dom: 7,
+    lun: 1, mar: 2, mer: 3, gio: 4, ven: 5, sab: 6, dom: 7,
   };
   return map[name] ?? 0;
 }
 
-function weekdayKey(
-  date: string
-): "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun" {
+function weekdayKey(date: string): "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun" {
   const w = weekdayRome(date);
   switch (w) {
-    case 1:
-      return "mon";
-    case 2:
-      return "tue";
-    case 3:
-      return "wed";
-    case 4:
-      return "thu";
-    case 5:
-      return "fri";
-    case 6:
-      return "sat";
-    case 7:
-      return "sun";
-    default:
-      return "mon";
+    case 1: return "mon";
+    case 2: return "tue";
+    case 3: return "wed";
+    case 4: return "thu";
+    case 5: return "fri";
+    case 6: return "sat";
+    case 7: return "sun";
+    default: return "mon";
   }
 }
 
@@ -111,9 +87,7 @@ function pickTierForDate(
 
   if (dt === "friday") {
     if (fridayAsWeekend) {
-      return (
-        prices.saturday ?? prices.sunday ?? prices.holiday ?? prices.feriali
-      );
+      return prices.saturday ?? prices.sunday ?? prices.holiday ?? prices.feriali;
     }
     return prices.friday ?? prices.feriali;
   }
@@ -132,11 +106,7 @@ function pickTierForDate(
 function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
   if (!tier) return undefined;
   if (typeof tier.unico === "number") return "unico";
-  if (
-    typeof tier.adulto === "number" ||
-    typeof tier.bambino === "number" ||
-    typeof tier.handicap === "number"
-  ) {
+  if (typeof tier.adulto === "number" || typeof tier.bambino === "number" || typeof tier.handicap === "number") {
     return "triple";
   }
   return undefined;
@@ -147,9 +117,7 @@ function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
 async function previewFromFeed(req: NextRequest, body: any) {
   const origin = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
-    : `${req.headers.get("x-forwarded-proto") ?? "https"}://${req.headers.get(
-        "host"
-      )}`;
+    : `${req.headers.get("x-forwarded-proto") ?? "https"}://${req.headers.get("host")}`;
 
   const u = new URL("/api/admin/events-feed-bundles", origin);
   u.searchParams.set("month", body.month);
@@ -178,22 +146,16 @@ async function previewFromFeed(req: NextRequest, body: any) {
   if (Array.isArray(feed?.events)) {
     for (const d of feed.events) {
       const date = String(d?.date || "").slice(0, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        warnings.push(`Giorno ignorato: date non valida "${d?.date}"`);
-        continue;
-      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { warnings.push(`Giorno ignorato: date non valida "${d?.date}"`); continue; }
       const slots = Array.isArray(d?.slots) ? d.slots : [];
       for (const s of slots) {
         const time = String(s?.time || "").slice(0, 5);
-        if (!/^\d{2}:\d{2}$/.test(time)) {
-          warnings.push(`Slot ignorato: time non valido "${s?.time}" (${date})`);
-          continue;
-        }
+        if (!/^\d{2}:\d{2}$/.test(time)) { warnings.push(`Slot ignorato: time non valido "${s?.time}" (${date})`); continue; }
         const dayType = s?.day_type || s?.dayType || null;
 
         const rows = [
-          { type: "Adulto", gid: s?.bundleVariantId_adulto },
-          { type: "Bambino", gid: s?.bundleVariantId_bambino },
+          { type: "Adulto",   gid: s?.bundleVariantId_adulto },
+          { type: "Bambino",  gid: s?.bundleVariantId_bambino },
           { type: "Handicap", gid: s?.bundleVariantId_handicap },
         ];
         let pushed = 0;
@@ -211,12 +173,7 @@ async function previewFromFeed(req: NextRequest, body: any) {
   }
 
   return NextResponse.json(
-    {
-      ok: true,
-      summary: { seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 },
-      preview,
-      warnings,
-    },
+    { ok: true, summary: { seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 }, preview, warnings },
     { status: 200 }
   );
 }
@@ -224,30 +181,19 @@ async function previewFromFeed(req: NextRequest, body: any) {
 async function generateFromFeed(req: NextRequest, body: any) {
   // Validazioni minime per creazione reale
   if (body.dryRun !== false) {
-    return NextResponse.json(
-      { ok: false, error: "bad_request", detail: "dryRun:false richiesto per creare dal feed" },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "bad_request", detail: "dryRun:false richiesto per creare dal feed" }, { status: 400 });
   }
   if (!body["prices€"] || typeof body["prices€"] !== "object") {
-    return NextResponse.json(
-      { ok: false, error: "missing_prices", detail: 'Passa "prices€" nel body (per day type)' },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "missing_prices", detail: 'Passa "prices€" nel body (per day type)' }, { status: 400 });
   }
   if (typeof body.capacityPerSlot !== "number" || body.capacityPerSlot <= 0) {
-    return NextResponse.json(
-      { ok: false, error: "missing_capacity", detail: 'Passa "capacityPerSlot" > 0' },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "missing_capacity", detail: 'Passa "capacityPerSlot" > 0' }, { status: 400 });
   }
 
   // 1) Leggi feed
   const origin = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
-    : `${req.headers.get("x-forwarded-proto") ?? "https"}://${req.headers.get(
-        "host"
-      )}`;
+    : `${req.headers.get("x-forwarded-proto") ?? "https"}://${req.headers.get("host")}`;
 
   const u = new URL("/api/admin/events-feed-bundles", origin);
   u.searchParams.set("month", body.month);
@@ -289,10 +235,11 @@ async function generateFromFeed(req: NextRequest, body: any) {
   const templateSuffix = body.templateSuffix;
   const tags = body.tags;
   const description = body.description;
-
-  const locationId =
-    body.locationId || DEFAULT_LOCATION_ID || null;
+  const locationId = body.locationId ?? null;
   const prices = body["prices€"] as PricesEuro;
+
+  // lettura opzionale della publication per "negozio online"
+  const publishToPublicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || undefined;
 
   const getTierFor = (dt: DayType): PriceTierEuro | undefined => {
     if (dt === "holiday") return prices.holiday;
@@ -305,74 +252,43 @@ async function generateFromFeed(req: NextRequest, body: any) {
   const events = Array.isArray(feed?.events) ? feed.events : [];
   for (const d of events) {
     const date = String(d?.date || "").slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      warnings.push(`Giorno ignorato: "${d?.date}"`);
-      continue;
-    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { warnings.push(`Giorno ignorato: "${d?.date}"`); continue; }
     const slots = Array.isArray(d?.slots) ? d.slots : [];
     for (const s of slots) {
       const time = String(s?.time || "").slice(0, 5);
-      if (!/^\d{2}:\d{2}$/.test(time)) {
-        warnings.push(`Slot ignorato: "${s?.time}" (${date})`);
-        continue;
-      }
+      if (!/^\d{2}:\d{2}$/.test(time)) { warnings.push(`Slot ignorato: "${s?.time}" (${date})`); continue; }
       const dt = toDayType(s?.day_type ?? s?.dayType);
       const tier = getTierFor(dt);
-      if (!tier) {
-        warnings.push(`Prezzi mancanti per ${date} ${time} (${dt})`);
-        continue;
-      }
+      if (!tier) { warnings.push(`Prezzi mancanti per ${date} ${time} (${dt})`); continue; }
 
-      // Seat
-      const seatArgs = {
-        date,
-        time,
-        titleBase: eventHandle,
-        tags,
-        description,
-        templateSuffix,
+      // crea/riusa Seat
+      const seat = await ensureSeatUnit({
+        date, time, titleBase: eventHandle, tags, description, templateSuffix,
         dryRun: false,
-        status: "ACTIVE" as const,
-        publishToPublicationId: ONLINE_PUBLICATION_ID || undefined,
-      };
-      const seat = await ensureSeatUnit(seatArgs as any);
+        status: "ACTIVE",
+        publishToPublicationId,
+      });
       if (seat.created) seatsCreated++;
 
-      // Stock iniziale
+      // stock iniziale
       await ensureInventory({
-        variantId: seat.variantId,
-        locationId: (locationId || undefined) as any,
-        quantity: body.capacityPerSlot,
-        dryRun: false,
+        variantId: seat.variantId, locationId: locationId ?? undefined, quantity: body.capacityPerSlot, dryRun: false,
       });
       inventoryAdjusted++;
 
-      // Bundle (triple)
-      const bundleArgs = {
-        eventHandle,
-        date,
-        time,
-        titleBase: eventHandle,
-        templateSuffix,
-        tags,
-        description,
-        dayType: dt,
-        mode: "triple" as const,
-        "priceTier€": tier,
+      // modalità: dal feed impostiamo "triple" (Adulto/Bambino/Handicap)
+      const bundle = await ensureBundle({
+        eventHandle, date, time, titleBase: eventHandle, templateSuffix, tags, description,
+        dayType: dt, mode: "triple", "priceTier€": tier,
         dryRun: false,
-        status: "ACTIVE" as const,
-        publishToPublicationId: ONLINE_PUBLICATION_ID || undefined,
-      };
-      const bundle = await ensureBundle(bundleArgs as any);
+        status: "ACTIVE",
+        publishToPublicationId,
+      });
       if (bundle.createdProduct) bundlesCreated++;
       variantsCreated += bundle.createdVariants ?? 0;
 
-      // Relazioni (qty: 1/1/2)
-      const compPlan: (["adulto" | "bambino" | "handicap", number])[] = [
-        ["adulto", 1],
-        ["bambino", 1],
-        ["handicap", 2],
-      ];
+      // collega componenti (qty: 1/1/2)
+      const compPlan: (["adulto"|"bambino"|"handicap", number])[] = [["adulto",1],["bambino",1],["handicap",2]];
       for (const [k, qty] of compPlan) {
         const parentVariantId = bundle.variantMap[k];
         if (!parentVariantId) continue;
@@ -385,14 +301,11 @@ async function generateFromFeed(req: NextRequest, body: any) {
         relationshipsUpserted++;
       }
 
-      // Prezzi
+      // prezzi
       const pricesToSet: Record<string, number | undefined> = {};
-      if (bundle.variantMap.adulto && typeof tier.adulto === "number")
-        pricesToSet[bundle.variantMap.adulto] = tier.adulto;
-      if (bundle.variantMap.bambino && typeof tier.bambino === "number")
-        pricesToSet[bundle.variantMap.bambino] = tier.bambino;
-      if (bundle.variantMap.handicap && typeof tier.handicap === "number")
-        pricesToSet[bundle.variantMap.handicap] = tier.handicap;
+      if (bundle.variantMap.adulto && typeof tier.adulto === "number")   pricesToSet[bundle.variantMap.adulto] = tier.adulto;
+      if (bundle.variantMap.bambino && typeof tier.bambino === "number") pricesToSet[bundle.variantMap.bambino] = tier.bambino;
+      if (bundle.variantMap.handicap && typeof tier.handicap === "number") pricesToSet[bundle.variantMap.handicap] = tier.handicap;
 
       if (Object.keys(pricesToSet).length) {
         await setVariantPrices(bundle.productId, pricesToSet);
@@ -402,9 +315,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
       // preview breve (solo primi 10)
       if (preview.length < 10) {
         preview.push({
-          date,
-          time,
-          dayType: dt,
+          date, time, dayType: dt,
           seatProductId: seat.productId,
           bundleProductId: bundle.productId,
           variantMap: bundle.variantMap,
@@ -446,8 +357,6 @@ export async function POST(req: NextRequest) {
       tags?: string[];
       description?: string;
       imageUrl?: string;
-      publishToPublicationId?: string;
-      status?: "ACTIVE" | "DRAFT";
     };
     try {
       body = await req.json();
@@ -455,7 +364,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
     }
 
-    // Feed (preview o creazione)
+    // Se arrivano month+collection: feed (preview o creazione)
     const anyBody = body as any;
     if (anyBody?.month && anyBody?.collection) {
       if (anyBody.dryRun === false) {
@@ -464,14 +373,10 @@ export async function POST(req: NextRequest) {
       return await previewFromFeed(req, anyBody);
     }
 
-    // Solo source:"manual"
+    // Altrimenti accettiamo solo source:"manual"
     if (body.source !== "manual") {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "source_not_supported_yet",
-          detail: 'Usa {"source":"manual"} oppure passa month+collection per il feed',
-        },
+        { ok: false, error: "source_not_supported_yet", detail: 'Usa {"source":"manual"} oppure passa month+collection per il feed' },
         { status: 400 }
       );
     }
@@ -484,8 +389,6 @@ export async function POST(req: NextRequest) {
       tags?: string[];
       description?: string;
       imageUrl?: string;
-      publishToPublicationId?: string;
-      status?: "ACTIVE" | "DRAFT";
     };
     const dryRun = input.dryRun !== false; // default true
 
@@ -493,13 +396,6 @@ export async function POST(req: NextRequest) {
     const tags = input.tags;
     const description = input.description;
     const imageUrl = input.imageUrl;
-
-    // defaults: location + publication + status
-    const locationId =
-      input.locationId || DEFAULT_LOCATION_ID || null;
-    const publishToPublicationId =
-      input.publishToPublicationId || ONLINE_PUBLICATION_ID || undefined;
-    const productStatus = input.status || "ACTIVE";
 
     const holidaysArr = await getShopPublicHolidays();
     const holidays = new Set(holidaysArr);
@@ -512,102 +408,67 @@ export async function POST(req: NextRequest) {
     let bundlesCreated = 0;
     let variantsCreated = 0;
 
+    // lettura opzionale della publication per "negozio online"
+    const publishToPublicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || undefined;
+
     for (const date of dates) {
       const dt = dayTypeOf(date, holidays);
 
       const useWeekendSlots =
-        dt === "saturday" ||
-        dt === "sunday" ||
-        dt === "holiday" ||
-        (dt === "friday" && input.fridayAsWeekend);
+        dt === "saturday" || dt === "sunday" || dt === "holiday" || (dt === "friday" && input.fridayAsWeekend);
       const slots = useWeekendSlots ? input.weekendSlots : input.weekdaySlots;
 
-      const tier = pickTierForDate(
-        date,
-        dt,
-        input["prices€"],
-        input.fridayAsWeekend,
-        input.exceptionsByDate
-      );
+      const tier = pickTierForDate(date, dt, input["prices€"], input.fridayAsWeekend, input.exceptionsByDate);
       const mode = decideMode(tier);
 
       for (const time of slots) {
-        const item: PreviewItem = {
-          date,
-          time,
-          dayType: dt,
-          "pricePlan€": tier,
-          mode: mode as any,
-        };
+        const item: PreviewItem = { date, time, dayType: dt, "pricePlan€": tier, mode: mode as any };
 
         if (!tier || !mode) {
           item.warnings = item.warnings ?? [];
           if (!tier) item.warnings.push("Nessun listino prezzi per questo slot");
-          if (!mode)
-            item.warnings.push(
-              "Definisci 'unico' o almeno una tra adulto/bambino/handicap"
-            );
+          if (!mode) item.warnings.push("Definisci 'unico' o almeno una tra adulto/bambino/handicap");
           if (preview.length < 10) preview.push(item);
           continue;
         }
 
         // Seat Unit
-        const seatArgs = {
-          date,
-          time,
-          titleBase: input.eventHandle,
-          tags,
-          description,
-          templateSuffix,
+        const seat = await ensureSeatUnit({
+          date, time, titleBase: input.eventHandle, tags, description, templateSuffix,
           dryRun,
-          status: productStatus as const,
+          status: "ACTIVE",
           publishToPublicationId,
           imageUrl,
-        };
-        const seat = await ensureSeatUnit(seatArgs as any);
+        });
         if (!dryRun && seat.created) seatsCreated++;
 
         // Stock iniziale
         await ensureInventory({
           variantId: seat.variantId,
-          locationId: locationId ?? undefined,
+          locationId: input.locationId,
           quantity: input.capacityPerSlot,
           dryRun,
         });
 
         // Bundle
-        const bundleArgs = {
+        const bundle = await ensureBundle({
           eventHandle: input.eventHandle,
-          date,
-          time,
-          titleBase: input.eventHandle,
-          templateSuffix,
-          tags,
-          description,
-          dayType: dt,
-          mode,
-          "priceTier€": tier,
+          date, time, titleBase: input.eventHandle,
+          templateSuffix, tags, description,
+          dayType: dt, mode, "priceTier€": tier,
           dryRun,
-          status: productStatus as const,
+          status: "ACTIVE",
           publishToPublicationId,
           imageUrl,
-        };
-        const bundle = await ensureBundle(bundleArgs as any);
+        });
         if (!dryRun) {
           if (bundle.createdProduct) bundlesCreated++;
-          if (typeof bundle.createdVariants === "number")
-            variantsCreated += bundle.createdVariants;
+          if (typeof bundle.createdVariants === "number") variantsCreated += bundle.createdVariants;
         }
 
-        // Componenti (qty 1 per tutte, handicap = 2)
-        const compOps: (["unico" | "adulto" | "bambino" | "handicap", number])[] =
-          mode === "unico"
-            ? [["unico", 1]]
-            : [
-                ["adulto", 1],
-                ["bambino", 1],
-                ["handicap", 2],
-              ];
+        // Componenti (collega variante seat) — qty 1 per tutte, handicap = 2
+        const compOps: (["unico"|"adulto"|"bambino"|"handicap", number])[] =
+          mode === "unico" ? [["unico", 1]] : [["adulto", 1], ["bambino", 1], ["handicap", 2]];
         if (!dryRun) {
           for (const [k, qty] of compOps) {
             const parentVariantId = bundle.variantMap[k];
