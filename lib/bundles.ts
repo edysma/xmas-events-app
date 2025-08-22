@@ -156,6 +156,16 @@ const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
   }
 `;
 
+// Pubblicazione al canale "Negozio online"
+const M_PUBLISHABLE_PUBLISH = /* GraphQL */ `
+  mutation PublishOne($id: ID!, $publicationId: ID!) {
+    publishablePublish(id: $id, input: { publicationId: $publicationId }) {
+      publishable { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
@@ -171,21 +181,44 @@ async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   return node;
 }
 
-async function createProductDraft(opts: {
+// legge l'ID pubblicazione del canale "Negozio online" da ENV (impostato su Vercel)
+function getOnlineStorePublicationIdOrThrow(): string {
+  const id = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
+  if (!id) {
+    throw new Error(
+      "SHOPIFY_ONLINE_STORE_PUBLICATION_ID mancante. Impostalo nelle Environment Variables Vercel."
+    );
+  }
+  return id;
+}
+
+async function publishProductToOnlineStore(productId: string, pubId?: string) {
+  const publicationId = pubId || getOnlineStorePublicationIdOrThrow();
+  const res = await adminFetchGQL<{ publishablePublish: { userErrors?: { message: string }[] } }>(
+    M_PUBLISHABLE_PUBLISH,
+    { id: productId, publicationId }
+  );
+  const errs = (res as any).publishablePublish?.userErrors || [];
+  if (errs.length) throw new Error(`publishablePublish error: ${errs.map((e: any) => e.message).join(" | ")}`);
+}
+
+async function createProductActive(opts: {
   title: string;
   templateSuffix?: string;
   tags?: string[];
   descriptionHtml?: string;
+  publishToPublicationId?: string; // opzionale, se omesso legge da ENV
 }) {
+  // crea ACTIVE
   const res = await adminFetchGQL<{ productCreate: { product?: any; userErrors: { message: string }[] } }>(
     M_PRODUCT_CREATE,
     {
       input: {
         title: opts.title,
-        status: "DRAFT",
+        status: "ACTIVE",
         templateSuffix: opts.templateSuffix || undefined,
         tags: opts.tags || undefined,
-        descriptionHtml: opts.descriptionHtml || undefined
+        descriptionHtml: opts.descriptionHtml || undefined,
       },
     }
   );
@@ -193,9 +226,12 @@ async function createProductDraft(opts: {
   if (errs.length) throw new Error(`productCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
+
+  // pubblica al Negozio online
+  await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
+
   return product;
 }
-
 
 async function getProductById(id: string) {
   const data = await adminFetchGQL<{ product: any }>(Q_PRODUCT_BY_ID, { id });
@@ -230,7 +266,7 @@ function mapVariantIdsFromNodes(nodes: any[]): Record<"unico" | "adulto" | "bamb
 // --- API pubbliche ---
 
 /**
- * Crea/riusa il prodotto "Posto" (nascosto/draft) con 1 sola variante.
+ * Crea/riusa il prodotto "Posto" (ACTIVE + pubblicato) con 1 sola variante.
  */
 export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<EnsureSeatUnitResult> {
   const seatTitle = buildSeatTitle(input.titleBase, input.date, input.time);
@@ -252,8 +288,8 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     };
   }
 
-  // 3) crea prodotto draft
-  const product = await createProductDraft({
+  // 3) crea prodotto ACTIVE + pubblica
+  const product = await createProductActive({
     title: seatTitle,
     templateSuffix: input.templateSuffix,
     tags: Array.from(new Set([...(input.tags || []), "SeatUnit"])),
@@ -320,7 +356,7 @@ export async function ensureInventory(opts: {
 }
 
 /**
- * Crea/riusa il prodotto "Bundle" e assicura le varianti richieste
+ * Crea/riusa il prodotto "Bundle" (ACTIVE + pubblicato) e assicura le varianti richieste
  * (modalità "unico" -> solo "Biglietto unico"; modalità "triple" -> Adulto/Bambino/Handicap).
  */
 export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBundleResult> {
@@ -392,8 +428,8 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     return { productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN", variantMap: ret, createdProduct: false, createdVariants: 0 };
   }
 
-  // 3) crea prodotto (draft)
-  const product = await createProductDraft({
+  // 3) crea prodotto ACTIVE + pubblica
+  const product = await createProductActive({
     title,
     templateSuffix: input.templateSuffix,
     tags: Array.from(new Set([...(input.tags || []), "Bundle", input.eventHandle].filter(Boolean))),
@@ -435,26 +471,25 @@ export async function setVariantPrices(
   mapEuro: Record<string, number | undefined>
 ) {
   const variantsInput = Object.entries(mapEuro)
-  .filter(([, eur]) => typeof eur === "number" && Number.isFinite(eur as number))
-  .map(([id, eur]) => ({
-    id,
-    // Schema 2024-10: price come STRINGA decimale (niente currencyCode)
-    price: (eur as number).toFixed(2),
-  }));
-
+    .filter(([, eur]) => typeof eur === "number" && Number.isFinite(eur as number))
+    .map(([id, eur]) => ({
+      id,
+      // Schema 2024-10: price come STRINGA decimale (niente currencyCode)
+      price: (eur as number).toFixed(2),
+    }));
 
   const M = /* GraphQL */ `
-  mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-      userErrors { field message }
+    mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        userErrors { field message }
+      }
     }
-  }
-`;
+  `;
 
   const r = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors: { message: string }[] } }>(M, {
-  productId,
-  variants: variantsInput,
-});
+    productId,
+    variants: variantsInput,
+  });
 
   const errs = (r as any).productVariantsBulkUpdate?.userErrors || [];
   if (errs.length) throw new Error(`productVariantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
