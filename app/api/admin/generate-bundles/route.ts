@@ -1,5 +1,5 @@
 // app/api/admin/generate-bundles/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { adminFetchGQL, getShopPublicHolidays, publishProductToPublication } from "@/lib/shopify-admin";
 import { adminFetchGQL, getShopPublicHolidays } from "@/lib/shopify-admin";
 import {
   ensureSeatUnit,
@@ -124,33 +124,9 @@ const M_PRODUCT_ACTIVATE = /* GraphQL */ `
   }
 `;
 
-// Publishable publish (Product/Collection) — API moderna: id + input[]
-const M_PUBLISHABLE_PUBLISH = /* GraphQL */ `
-  mutation PubPublish($id: ID!, $input: [PublicationInput!]!) {
-    publishablePublish(id: $id, input: $input) {
-      publishable {
-        __typename
-        ... on Product { id status }
-        ... on Collection { id }
-      }
-      userErrors { field message }
-    }
-  }
-`;
-
 async function activateProduct(productId: string) {
   const r = await adminFetchGQL(M_PRODUCT_ACTIVATE, { input: { id: productId, status: "ACTIVE" } });
   const errs = (r as any)?.productUpdate?.userErrors || [];
-  if (errs.length) throw new Error(`Shopify GQL errors: ${errs.map((e: any) => e.message).join(" | ")}`);
-  return true;
-}
-
-async function publishProduct(productId: string, publicationId: string) {
-  const r = await adminFetchGQL(M_PUBLISHABLE_PUBLISH, {
-    id: productId,
-    input: [{ publicationId }],
-  });
-  const errs = (r as any)?.publishablePublish?.userErrors || [];
   if (errs.length) throw new Error(`Shopify GQL errors: ${errs.map((e: any) => e.message).join(" | ")}`);
   return true;
 }
@@ -353,9 +329,9 @@ async function generateFromFeed(req: NextRequest, body: any) {
 
       // activate + publish (Seat + Bundle)
       await activateProduct(seat.productId);
-      await publishProduct(seat.productId, publicationId);
+      await publishProductToPublication(seat.productId, publicationId);
       await activateProduct(bundle.productId);
-      await publishProduct(bundle.productId, publicationId);
+      await publishProductToPublication(bundle.productId, publicationId);
 
       // preview breve (solo primi 10)
       if (preview.length < 10) {
