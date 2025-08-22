@@ -2,7 +2,11 @@
 // Helpers per creare/riusare Posti (Seat Unit) e Biglietti (Bundle) e collegare componenti.
 // Allineato a Admin GraphQL 2024-07/2024-10
 
-import { adminFetchGQL, getDefaultLocationId, publishProductToPublication } from "@/lib/shopify-admin";
+import {
+  adminFetchGQL,
+  getDefaultLocationId,
+  publishProductToPublication, // <-- usiamo l'helper centralizzato
+} from "@/lib/shopify-admin";
 
 // --- Tipi locali ---
 export type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
@@ -171,8 +175,20 @@ async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   return node;
 }
 
-async function publishProductToOnlineStore(productId: string, pubId?: string) {
-  await publishProductToPublication(productId, pubId);
+// legge l'ID pubblicazione del canale "Negozio online" da ENV (impostato su Vercel)
+function getOnlineStorePublicationIdOrThrow(): string {
+  const id = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
+  if (!id) {
+    throw new Error(
+      "SHOPIFY_ONLINE_STORE_PUBLICATION_ID mancante. Impostalo nelle Environment Variables Vercel."
+    );
+  }
+  return id;
+}
+
+async function publishProductToOnlineStore(productId: string, _pubId?: string) {
+  // 🔧 FIX: publishProductToPublication accetta **solo** (productId)
+  await publishProductToPublication(productId);
 }
 
 async function createProductActive(opts: {
@@ -180,7 +196,7 @@ async function createProductActive(opts: {
   templateSuffix?: string;
   tags?: string[];
   descriptionHtml?: string;
-  publishToPublicationId?: string; // opzionale, se omesso legge da ENV
+  publishToPublicationId?: string; // opzionale (non usato direttamente qui, usiamo ENV nell'helper)
 }) {
   // crea ACTIVE
   const res = await adminFetchGQL<{ productCreate: { product?: any; userErrors: { message: string }[] } }>(
@@ -200,7 +216,7 @@ async function createProductActive(opts: {
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
 
-  // pubblica al Negozio online
+  // pubblica al Negozio online (usa helper centralizzato che legge ENV)
   await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
 
   return product;
@@ -401,7 +417,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     return { productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN", variantMap: ret, createdProduct: false, createdVariants: 0 };
   }
 
-  // 3) crea prodotto ACTIVE + pubblica
+  // 3) crea prodotto (draft -> ACTIVE + publish)
   const product = await createProductActive({
     title,
     templateSuffix: input.templateSuffix,
