@@ -1,11 +1,9 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 
 type Summary = Record<string, number>;
 type PreviewItem = any;
-
-type Mode = "feed" | "manual";
 
 const LS_SECRET = "sinflora_admin_secret";
 const LS_LAST_BODY = "sinflora_admin_last_body";
@@ -32,19 +30,25 @@ export default function AdminGeneratePage() {
   // ---------- Auth ----------
   const [adminSecret, setAdminSecret] = useState<string>("");
 
-  // ---------- Tabs ----------
-  const [mode, setMode] = useState<Mode>("feed");
-  const isFeed = mode === "feed";
-
-  // ---------- Common fields ----------
+  // ---------- Manual fields (UI target) ----------
   const [dryRun, setDryRun] = useState(true);
+  const [eventHandle, setEventHandle] = useState<string>("viaggio-incantato");
+
+  const [startDate, setStartDate] = useState<string>("2025-12-05");
+  const [endDate, setEndDate] = useState<string>("2025-12-06");
+
+  const [weekdaySlots, setWeekdaySlots] = useState<string>("11:00\n11:30");
+  const [weekendSlots, setWeekendSlots] = useState<string>("11:00\n11:30");
+  const [fridayAsWeekend, setFridayAsWeekend] = useState<boolean>(true);
+
   const [capacityPerSlot, setCapacityPerSlot] = useState<number>(50);
-  const [locationId, setLocationId] = useState<string>("");
+
+  // Metadati prodotto
   const [templateSuffix, setTemplateSuffix] = useState<string>("bundle");
   const [tags, setTags] = useState<string>("Bundle,SeatUnit,Sinflora");
   const [description, setDescription] = useState<string>("Biglietto evento");
 
-  // Prices JSON (per semplicità e aderenza all’API)
+  // Prezzi JSON (aderente all’API)
   const defaultPrices = {
     feriali: { adulto: 12, bambino: 8, handicap: 12 },
     friday: { adulto: 12, bambino: 8, handicap: 12 },
@@ -54,19 +58,8 @@ export default function AdminGeneratePage() {
   };
   const [pricesJSON, setPricesJSON] = useState<string>(pretty(defaultPrices));
 
-  // ---------- FEED fields ----------
-  const [month, setMonth] = useState<string>("2025-12");
-  const [collection, setCollection] = useState<string>("viaggio-incantato");
-  const [batchSize, setBatchSize] = useState<number>(25); // opzionale, supportato lato API
-
-  // ---------- MANUAL fields ----------
-  const [eventHandle, setEventHandle] = useState<string>("viaggio-incantato");
-  const [startDate, setStartDate] = useState<string>("2025-12-05");
-  const [endDate, setEndDate] = useState<string>("2025-12-06");
-  const [weekdaySlots, setWeekdaySlots] = useState<string>("11:00\n11:30");
-  const [weekendSlots, setWeekendSlots] = useState<string>("11:00\n11:30");
-  const [fridayAsWeekend, setFridayAsWeekend] = useState<boolean>(true);
-  const [exceptionsByDateJSON, setExceptionsByDateJSON] = useState<string>("{}"); // opzionale
+  // Eccezioni opzionali
+  const [exceptionsByDateJSON, setExceptionsByDateJSON] = useState<string>("{}");
 
   // ---------- Output ----------
   const [pending, setPending] = useState<boolean>(false);
@@ -76,26 +69,18 @@ export default function AdminGeneratePage() {
   const [error, setError] = useState<string>("");
 
   // ---------- Persist piccoli comfort ----------
-  // carica da localStorage (solo client)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       const s = window.localStorage.getItem(LS_SECRET);
       if (s) setAdminSecret(s);
-      // LS_LAST_BODY lo mostriamo sotto, lo leggeremo in un altro effect
-    } catch {
-      // ignora
-    }
+    } catch {}
   }, []);
-
-  // salva secret su localStorage (solo client)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       window.localStorage.setItem(LS_SECRET, adminSecret ?? "");
-    } catch {
-      // ignora
-    }
+    } catch {}
   }, [adminSecret]);
 
   // ---------- Helpers ----------
@@ -113,43 +98,24 @@ export default function AdminGeneratePage() {
       .map((t) => t.trim())
       .filter(Boolean);
 
-    if (isFeed) {
-      const body: any = {
-        month,
-        collection,
-        source: "manual", // coerente con backend attuale
-        dryRun,
-        capacityPerSlot,
-        locationId: locationId || null,
-        templateSuffix: templateSuffix || undefined,
-        tags: tagsArr.length ? tagsArr : undefined,
-        description: description || undefined,
-        "prices€": prices,
-        // Avanzato opzionale:
-        batchSize: Math.max(1, Math.min(batchSize || 25, 50)),
-      };
-      return body;
-    } else {
-      const body: any = {
-        source: "manual",
-        eventHandle,
-        startDate,
-        endDate,
-        weekdaySlots: parseLines(weekdaySlots),
-        weekendSlots: parseLines(weekendSlots),
-        fridayAsWeekend,
-        capacityPerSlot,
-        locationId: locationId || null,
-        templateSuffix: templateSuffix || undefined,
-        tags: tagsArr.length ? tagsArr : undefined,
-        description: description || undefined,
-        "prices€": prices,
-        // opzionale
-        exceptionsByDate: tryParseJSON(exceptionsByDateJSON, undefined),
-        dryRun,
-      };
-      return body;
-    }
+    const body: any = {
+      source: "manual",
+      eventHandle,
+      startDate,
+      endDate,
+      weekdaySlots: parseLines(weekdaySlots),
+      weekendSlots: parseLines(weekendSlots),
+      fridayAsWeekend,
+      capacityPerSlot,
+      // niente locationId: lo risolve il backend da DEFAULT_LOCATION_ID
+      templateSuffix: templateSuffix || undefined,
+      tags: tagsArr.length ? tagsArr : undefined,
+      description: description || undefined,
+      "prices€": prices,
+      exceptionsByDate: tryParseJSON(exceptionsByDateJSON, undefined),
+      dryRun,
+    };
+    return body;
   }
 
   async function doCall() {
@@ -161,13 +127,10 @@ export default function AdminGeneratePage() {
 
     const body = buildBody();
 
-    // salva ultimo payload (solo client)
     if (typeof window !== "undefined") {
       try {
         window.localStorage.setItem(LS_LAST_BODY, pretty(body));
-      } catch {
-        // ignora
-      }
+      } catch {}
     }
 
     try {
@@ -195,7 +158,6 @@ export default function AdminGeneratePage() {
     }
   }
 
-  // Per pulsanti Preview/Crea cambiamo solo dryRun al volo
   async function onPreview() {
     const was = dryRun;
     try {
@@ -215,7 +177,7 @@ export default function AdminGeneratePage() {
     }
   }
 
-  // ---------- Ultimo payload (mostra solo su client) ----------
+  // Ultimo payload (solo client)
   const [lastPayload, setLastPayload] = useState<string>("");
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -225,31 +187,23 @@ export default function AdminGeneratePage() {
     } catch {
       setLastPayload("");
     }
-  }, [summary, preview, warnings, error]); // aggiorno quando arrivano risultati
+  }, [summary, preview, warnings, error]);
 
-  // Render helpers per preview generico (supporta sia preview “feed” che “manuale”)
+  // Preview row (manual-only shape)
   function renderPreviewRow(item: any, idx: number) {
-    // Due formati supportati:
-    // 1) Feed preview: { date, time, dayType, type?, bundleVariantIdGid? }
-    // 2) Manual/real: { date,time,dayType, seatProductId?, bundleProductId?, variantMap? }
-    const type = item?.type || "";
     const adult = item?.variantMap?.adulto || "";
     const kid = item?.variantMap?.bambino || "";
     const handicap = item?.variantMap?.handicap || "";
-    const bundleVar = item?.bundleVariantIdGid || "";
-
     return (
       <tr key={idx} className="border-b last:border-0">
         <td className="py-2 px-2">{String(item?.date ?? "")}</td>
         <td className="py-2 px-2">{String(item?.time ?? "")}</td>
         <td className="py-2 px-2">{String(item?.dayType ?? "")}</td>
-        <td className="py-2 px-2">{type || "-"}</td>
         <td className="py-2 px-2 text-xs break-all">{String(item?.seatProductId ?? "-")}</td>
         <td className="py-2 px-2 text-xs break-all">{String(item?.bundleProductId ?? "-")}</td>
         <td className="py-2 px-2 text-xs break-all">{adult || "-"}</td>
         <td className="py-2 px-2 text-xs break-all">{kid || "-"}</td>
         <td className="py-2 px-2 text-xs break-all">{handicap || "-"}</td>
-        <td className="py-2 px-2 text-xs break-all">{bundleVar || "-"}</td>
       </tr>
     );
   }
@@ -274,127 +228,77 @@ export default function AdminGeneratePage() {
           </div>
         </header>
 
-        {/* Tabs */}
+        {/* Manuale (UI target) */}
         <div className="bg-white rounded-2xl shadow-sm border p-4">
-          <div className="flex gap-2 mb-4">
-            <button
-              className={`px-3 py-2 rounded-xl border ${isFeed ? "bg-black text-white" : ""}`}
-              onClick={() => setMode("feed")}
-            >
-              Feed
-            </button>
-            <button
-              className={`px-3 py-2 rounded-xl border ${!isFeed ? "bg-black text-white" : ""}`}
-              onClick={() => setMode("manual")}
-            >
-              Manuale
-            </button>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-sm text-gray-600">Event handle</label>
+              <input value={eventHandle} onChange={(e) => setEventHandle(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+            </div>
+            <div>
+              <label className="text-sm text-gray-600">Start date</label>
+              <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+            </div>
+            <div>
+              <label className="text-sm text-gray-600">End date</label>
+              <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-600">Capienza per slot</label>
+              <input
+                type="number"
+                value={capacityPerSlot}
+                onChange={(e) => setCapacityPerSlot(parseInt(e.target.value || "0", 10))}
+                className="w-full mt-1 rounded-xl border px-3 py-2"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-600">Template suffix</label>
+              <input value={templateSuffix} onChange={(e) => setTemplateSuffix(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="text-sm text-gray-600">Tag (separate da virgola)</label>
+              <input value={tags} onChange={(e) => setTags(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="text-sm text-gray-600">Descrizione</label>
+              <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+            </div>
           </div>
 
-          {isFeed ? (
-            <div className="grid md:grid-cols-2 gap-4">
-              <div>
-                <label className="text-sm text-gray-600">Month (YYYY-MM)</label>
-                <input value={month} onChange={(e) => setMonth(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-              </div>
-              <div>
-                <label className="text-sm text-gray-600">Collection (handle)</label>
-                <input value={collection} onChange={(e) => setCollection(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-              </div>
-              <div>
-                <label className="text-sm text-gray-600">Capienza per slot</label>
-                <input
-                  type="number"
-                  value={capacityPerSlot}
-                  onChange={(e) => setCapacityPerSlot(parseInt(e.target.value || "0", 10))}
-                  className="w-full mt-1 rounded-xl border px-3 py-2"
-                />
-              </div>
-              <div>
-                <label className="text-sm text-gray-600">Batch size (default 25)</label>
-                <input
-                  type="number"
-                  value={batchSize}
-                  onChange={(e) => setBatchSize(parseInt(e.target.value || "25", 10))}
-                  className="w-full mt-1 rounded-xl border px-3 py-2"
-                  min={1}
-                  max={50}
-                />
-              </div>
+          <div className="grid md:grid-cols-2 gap-4 mt-4">
+            <div>
+              <label className="text-sm text-gray-600">Weekday slots (uno per riga)</label>
+              <textarea
+                rows={3}
+                value={weekdaySlots}
+                onChange={(e) => setWeekdaySlots(e.target.value)}
+                className="w-full mt-1 rounded-xl border px-3 py-2"
+              />
             </div>
-          ) : (
-            <div className="grid md:grid-cols-2 gap-4">
-              <div>
-                <label className="text-sm text-gray-600">Event handle</label>
-                <input value={eventHandle} onChange={(e) => setEventHandle(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-              </div>
-              <div>
-                <label className="text-sm text-gray-600">Start date</label>
-                <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-              </div>
-              <div>
-                <label className="text-sm text-gray-600">End date</label>
-                <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-              </div>
-              <div className="md:col-span-2 grid md:grid-cols-2 gap-4">
-                <div>
-                  <label className="text-sm text-gray-600">Weekday slots (uno per riga)</label>
-                  <textarea
-                    rows={3}
-                    value={weekdaySlots}
-                    onChange={(e) => setWeekdaySlots(e.target.value)}
-                    className="w-full mt-1 rounded-xl border px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="text-sm text-gray-600">Weekend slots (uno per riga)</label>
-                  <textarea
-                    rows={3}
-                    value={weekendSlots}
-                    onChange={(e) => setWeekendSlots(e.target.value)}
-                    className="w-full mt-1 rounded-xl border px-3 py-2"
-                  />
-                </div>
-              </div>
-              <div className="md:col-span-2">
-                <label className="inline-flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={fridayAsWeekend} onChange={(e) => setFridayAsWeekend(e.target.checked)} />
-                  Venerdì usa prezzi weekend
-                </label>
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-sm text-gray-600">Eccezioni per data (JSON) — opzionale</label>
-                <textarea
-                  rows={3}
-                  value={exceptionsByDateJSON}
-                  onChange={(e) => setExceptionsByDateJSON(e.target.value)}
-                  className="w-full mt-1 rounded-xl border px-3 py-2 font-mono text-sm"
-                  placeholder={`{\n  "2025-12-08": { "adulto": 16, "bambino": 10, "handicap": 16 }\n}`}
-                />
-              </div>
+            <div>
+              <label className="text-sm text-gray-600">Weekend slots (uno per riga)</label>
+              <textarea
+                rows={3}
+                value={weekendSlots}
+                onChange={(e) => setWeekendSlots(e.target.value)}
+                className="w-full mt-1 rounded-xl border px-3 py-2"
+              />
             </div>
-          )}
-        </div>
+          </div>
 
-        {/* Metadati comuni */}
-        <div className="bg-white rounded-2xl shadow-sm border p-4 grid md:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm text-gray-600">Location ID (opzionale)</label>
-            <input value={locationId} onChange={(e) => setLocationId(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+          <div className="mt-3">
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={fridayAsWeekend} onChange={(e) => setFridayAsWeekend(e.target.checked)} />
+              Venerdì usa prezzi weekend
+            </label>
           </div>
-          <div>
-            <label className="text-sm text-gray-600">Template suffix</label>
-            <input value={templateSuffix} onChange={(e) => setTemplateSuffix(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-          </div>
-          <div className="md:col-span-2">
-            <label className="text-sm text-gray-600">Tag (separate da virgola)</label>
-            <input value={tags} onChange={(e) => setTags(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-          </div>
-          <div className="md:col-span-2">
-            <label className="text-sm text-gray-600">Descrizione</label>
-            <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-          </div>
-          <div className="md:col-span-2">
+
+          <div className="mt-4">
             <label className="text-sm text-gray-600">Prezzi (JSON)</label>
             <textarea
               rows={6}
@@ -406,6 +310,17 @@ export default function AdminGeneratePage() {
             <p className="text-xs text-gray-500 mt-1">
               Struttura attesa: <code>feriali</code>, <code>friday</code>, <code>saturday</code>, <code>sunday</code>, <code>holiday</code>. Valute in €.
             </p>
+          </div>
+
+          <div className="mt-4">
+            <label className="text-sm text-gray-600">Eccezioni per data (JSON) — opzionale</label>
+            <textarea
+              rows={3}
+              value={exceptionsByDateJSON}
+              onChange={(e) => setExceptionsByDateJSON(e.target.value)}
+              className="w-full mt-1 rounded-xl border px-3 py-2 font-mono text-sm"
+              placeholder={`{\n  "2025-12-08": { "adulto": 16, "bambino": 10, "handicap": 16 }\n}`}
+            />
           </div>
         </div>
 
@@ -477,13 +392,11 @@ export default function AdminGeneratePage() {
                         <th className="py-2 px-2">Date</th>
                         <th className="py-2 px-2">Time</th>
                         <th className="py-2 px-2">DayType</th>
-                        <th className="py-2 px-2">Type</th>
                         <th className="py-2 px-2">Seat Product</th>
                         <th className="py-2 px-2">Bundle Product</th>
                         <th className="py-2 px-2">Adulto</th>
                         <th className="py-2 px-2">Bambino</th>
                         <th className="py-2 px-2">Handicap</th>
-                        <th className="py-2 px-2">BundleVar GID</th>
                       </tr>
                     </thead>
                     <tbody>
