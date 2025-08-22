@@ -7,3 +7,12 @@
 html, body { height: 100%; }
 body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
 a { color: inherit; }
+/* debug: rimuovi dopo verifica */
+body::after {
+  content: "tw-ok";
+  position: fixed;
+  bottom: 6px;
+  right: 6px;
+  font-size: 10px;
+  opacity: 0.3;
+}
