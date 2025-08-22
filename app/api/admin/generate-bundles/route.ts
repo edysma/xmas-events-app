@@ -29,7 +29,7 @@ function listDates(start: string, end: string): string[] {
   const stop = new Date(end + "T00:00:00Z");
   while (d.getTime() <= stop.getTime()) {
     out.push(d.toISOString().slice(0, 10));
-    d.setUTCDate(d.getUTCDate() + 1);
+  d.setUTCDate(d.getUTCDate() + 1);
   }
   return out;
 }
@@ -112,10 +112,11 @@ function decideMode(tier?: PriceTierEuro): "unico" | "triple" | undefined {
   return undefined;
 }
 
-/* ---------------- GQL for status/publish ---------------- */
+/* ---------------- helpers: publish/activate ---------------- */
 
-const M_PRODUCT_UPDATE = /* GraphQL */ `
-  mutation ProductUpdate($input: ProductInput!) {
+// Product -> ACTIVE
+const M_PRODUCT_ACTIVATE = /* GraphQL */ `
+  mutation ProductActivate($input: ProductInput!) {
     productUpdate(input: $input) {
       product { id status }
       userErrors { field message }
@@ -123,42 +124,35 @@ const M_PRODUCT_UPDATE = /* GraphQL */ `
   }
 `;
 
-// ⚠️ Publishable è una union. Bisogna usare gli inline fragments.
+// Publishable publish (Product/Collection) — API moderna: id + input[]
 const M_PUBLISHABLE_PUBLISH = /* GraphQL */ `
-  mutation PubPublish($input: PublishablePublishInput!) {
-    publishablePublish(input: $input) {
-      userErrors { field message }
+  mutation PubPublish($id: ID!, $input: [PublicationInput!]!) {
+    publishablePublish(id: $id, input: $input) {
       publishable {
         __typename
         ... on Product { id status }
         ... on Collection { id }
       }
+      userErrors { field message }
     }
   }
 `;
 
-async function setProductActive(productId: string) {
-  const r = await adminFetchGQL<{
-    productUpdate: { userErrors?: { field?: string[]; message: string }[] }
-  }>(M_PRODUCT_UPDATE, { input: { id: productId, status: "ACTIVE" } });
-  const errs = (r as any)?.productUpdate?.userErrors ?? [];
-  if (errs.length) throw new Error(`productUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
+async function activateProduct(productId: string) {
+  const r = await adminFetchGQL(M_PRODUCT_ACTIVATE, { input: { id: productId, status: "ACTIVE" } });
+  const errs = (r as any)?.productUpdate?.userErrors || [];
+  if (errs.length) throw new Error(`Shopify GQL errors: ${errs.map((e: any) => e.message).join(" | ")}`);
+  return true;
 }
 
-async function publishProductToPublication(productId: string, publicationId?: string | null) {
-  if (!publicationId) return;
-  const r = await adminFetchGQL<{
-    publishablePublish: { userErrors?: { field?: string[]; message: string }[] }
-  }>(M_PUBLISHABLE_PUBLISH, {
-    input: {
-      publishableId: productId,
-      publicationId,
-    },
+async function publishProduct(productId: string, publicationId: string) {
+  const r = await adminFetchGQL(M_PUBLISHABLE_PUBLISH, {
+    id: productId,
+    input: [{ publicationId }],
   });
-  const errs = (r as any)?.publishablePublish?.userErrors ?? [];
-  // Errori “già pubblicato” possono comparire come userError: li ignoriamo in modo idempotente
-  const fatal = errs.filter((e: any) => !/already|già/i.test(e?.message || ""));
-  if (fatal.length) throw new Error(`publishablePublish error: ${fatal.map((e: any) => e.message).join(" | ")}`);
+  const errs = (r as any)?.publishablePublish?.userErrors || [];
+  if (errs.length) throw new Error(`Shopify GQL errors: ${errs.map((e: any) => e.message).join(" | ")}`);
+  return true;
 }
 
 /* ---------------- helpers: FEED ---------------- */
@@ -239,6 +233,11 @@ async function generateFromFeed(req: NextRequest, body: any) {
     return NextResponse.json({ ok: false, error: "missing_capacity", detail: 'Passa "capacityPerSlot" > 0' }, { status: 400 });
   }
 
+  const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
+  if (!publicationId) {
+    return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
+  }
+
   // 1) Leggi feed
   const origin = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
@@ -286,7 +285,6 @@ async function generateFromFeed(req: NextRequest, body: any) {
   const description = body.description;
   const locationId = body.locationId ?? null;
   const prices = body["prices€"] as PricesEuro;
-  const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || null;
 
   const getTierFor = (dt: DayType): PriceTierEuro | undefined => {
     if (dt === "holiday") return prices.holiday;
@@ -314,27 +312,19 @@ async function generateFromFeed(req: NextRequest, body: any) {
       });
       if (seat.created) seatsCreated++;
 
-      // ATTIVA + PUBBLICA Seat
-      await setProductActive(seat.productId);
-      await publishProductToPublication(seat.productId, publicationId);
-
       // stock iniziale
       await ensureInventory({
         variantId: seat.variantId, locationId: locationId ?? undefined, quantity: body.capacityPerSlot, dryRun: false,
       });
       inventoryAdjusted++;
 
-      // modalità: dal feed impostiamo "triple" (Adulto/Bambino/Handicap)
+      // bundle triple
       const bundle = await ensureBundle({
         eventHandle, date, time, titleBase: eventHandle, templateSuffix, tags, description,
         dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false,
       });
       if (bundle.createdProduct) bundlesCreated++;
       variantsCreated += bundle.createdVariants ?? 0;
-
-      // ATTIVA + PUBBLICA Bundle
-      await setProductActive(bundle.productId);
-      await publishProductToPublication(bundle.productId, publicationId);
 
       // collega componenti (qty: 1/1/2)
       const compPlan: (["adulto"|"bambino"|"handicap", number])[] = [["adulto",1],["bambino",1],["handicap",2]];
@@ -360,6 +350,12 @@ async function generateFromFeed(req: NextRequest, body: any) {
         await setVariantPrices(bundle.productId, pricesToSet);
         pricesUpdated += Object.keys(pricesToSet).length;
       }
+
+      // activate + publish (Seat + Bundle)
+      await activateProduct(seat.productId);
+      await publishProduct(seat.productId, publicationId);
+      await activateProduct(bundle.productId);
+      await publishProduct(bundle.productId, publicationId);
 
       // preview breve (solo primi 10)
       if (preview.length < 10) {
@@ -441,10 +437,15 @@ export async function POST(req: NextRequest) {
     };
     const dryRun = input.dryRun !== false; // default true
 
+    const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
+    if (!dryRun && !publicationId) {
+      return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
+    }
+
     const templateSuffix = input.templateSuffix;
     const tags = input.tags;
     const description = input.description;
-    // const imageUrl = input.imageUrl; // (non usato ora)
+    const imageUrl = input.imageUrl;
 
     const holidaysArr = await getShopPublicHolidays();
     const holidays = new Set(holidaysArr);
@@ -452,7 +453,6 @@ export async function POST(req: NextRequest) {
     const dates = listDates(input.startDate, input.endDate);
     const preview: PreviewItem[] = [];
     const warningsGlobal: string[] = [];
-    const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || null;
 
     let seatsCreated = 0;
     let bundlesCreated = 0;
@@ -485,12 +485,6 @@ export async function POST(req: NextRequest) {
         });
         if (!dryRun && seat.created) seatsCreated++;
 
-        if (!dryRun) {
-          // ATTIVA + PUBBLICA Seat
-          await setProductActive(seat.productId);
-          await publishProductToPublication(seat.productId, publicationId);
-        }
-
         // Stock iniziale
         await ensureInventory({
           variantId: seat.variantId,
@@ -510,10 +504,6 @@ export async function POST(req: NextRequest) {
         if (!dryRun) {
           if (bundle.createdProduct) bundlesCreated++;
           if (typeof bundle.createdVariants === "number") variantsCreated += bundle.createdVariants;
-
-          // ATTIVA + PUBBLICA Bundle
-          await setProductActive(bundle.productId);
-          await publishProductToPublication(bundle.productId, publicationId);
         }
 
         // Componenti (collega variante seat) — qty 1 per tutte, handicap = 2
@@ -547,6 +537,14 @@ export async function POST(req: NextRequest) {
           if (Object.keys(pricesToSet).length) {
             await setVariantPrices(bundle.productId, pricesToSet);
           }
+        }
+
+        // Activate + Publish (quando non è dry-run)
+        if (!dryRun && publicationId) {
+          await activateProduct(seat.productId);
+          await publishProduct(seat.productId, publicationId);
+          await activateProduct(bundle.productId);
+          await publishProduct(bundle.productId, publicationId);
         }
 
         // Preview (solo primi 10)
