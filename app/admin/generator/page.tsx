@@ -2,27 +2,42 @@
 
 import { useMemo, useState, useEffect } from "react";
 
-type Triple = { adulto?: number; bambino?: number; handicap?: number };
+/**
+ * Pagina Admin Generator (UI v2) con:
+ * - Admin Secret persistito in localStorage
+ * - Pulsanti “Crea posti” e “Crea biglietti” che chiamano le API
+ * - Body payload in modalità "manual" con "source":"manual"
+ * - Gestione prezzi (unico / triple) incluse le opzioni feriali per-giorno
+ * - Tipi locali per evitare errori TS con la chiave "perDay"
+ */
 
-type PricesEuro = {
-  holiday?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-  saturday?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-  sunday?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-  friday?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-  feriali?: (
-    | { unico?: number }
-    | { adulto?: number; bambino?: number; handicap?: number }
-  ) & {
-    perDay?: {
-      mon?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-      tue?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-      wed?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-      thu?: { unico?: number } | { adulto?: number; bambino?: number; handicap?: number };
-    };
+const LS_ADMIN_SECRET = "sinflora_admin_secret";
+
+/* ---------------- Tipi locali (solo per la UI) ---------------- */
+
+type PriceTierEuroLocal = {
+  unico?: number;
+  adulto?: number;
+  bambino?: number;
+  handicap?: number;
+};
+
+type FerialiTierLocal = PriceTierEuroLocal & {
+  perDay?: {
+    mon?: PriceTierEuroLocal;
+    tue?: PriceTierEuroLocal;
+    wed?: PriceTierEuroLocal;
+    thu?: PriceTierEuroLocal;
   };
 };
 
-const LS_ADMIN_SECRET = "sinflora_admin_secret";
+type PricesEuroLocal = {
+  holiday?: PriceTierEuroLocal;
+  saturday?: PriceTierEuroLocal;
+  sunday?: PriceTierEuroLocal;
+  friday?: PriceTierEuroLocal;
+  feriali?: FerialiTierLocal;
+};
 
 export default function AdminGeneratorUIV2() {
   // -----------------------------
@@ -35,7 +50,7 @@ export default function AdminGeneratorUIV2() {
   const [excluded, setExcluded] = useState<string[]>([]);
   const [timesText, setTimesText] = useState("");
 
-  const [productTitleBase, setProductTitleBase] = useState(""); // Posti (nascosti) — solo UI, al momento l’API usa eventHandle come base unica
+  const [productTitleBase, setProductTitleBase] = useState(""); // Posti (nascosti)
   const [capacityPerSlot, setCapacityPerSlot] = useState<number>(0);
 
   const [bundleTitleBase, setBundleTitleBase] = useState(""); // Biglietti (visibili)
@@ -43,6 +58,8 @@ export default function AdminGeneratorUIV2() {
   const [fridayAsWeekend, setFridayAsWeekend] = useState(false);
 
   // Prezzi — toggle "unico" + tripla (Adulto/Bambino/Handicap)
+  type Triple = { adulto?: number; bambino?: number; handicap?: number };
+
   const [holidayUnico, setHolidayUnico] = useState(false);
   const [holidayUnicoPrice, setHolidayUnicoPrice] = useState<number>(0);
   const [holidayTriple, setHolidayTriple] = useState<Triple>({});
@@ -213,148 +230,6 @@ export default function AdminGeneratorUIV2() {
   }
 
   // -----------------------------
-  // Build prezzi from UI
-  // -----------------------------
-  function toTier(unico: boolean, unicoPrice: number, triple: Triple) {
-    if (unico) return { unico: fix2(unicoPrice) };
-    const out: Triple = {};
-    if (typeof triple.adulto === "number") out.adulto = fix2(triple.adulto);
-    if (typeof triple.bambino === "number") out.bambino = fix2(triple.bambino);
-    if (typeof triple.handicap === "number") out.handicap = fix2(triple.handicap);
-    return out;
-  }
-
-  function fix2(n?: number) {
-    if (typeof n !== "number" || Number.isNaN(n)) return undefined;
-    return Math.round(n * 100) / 100;
-    }
-
-  function buildPricesEuro(): PricesEuro {
-    const prices: PricesEuro = {};
-    // Festivi
-    const hol = toTier(holidayUnico, holidayUnicoPrice, holidayTriple);
-    if (Object.keys(hol).length) prices.holiday = hol as any;
-
-    // Sabato
-    const sat = toTier(satUnico, satUnicoPrice, satTriple);
-    if (Object.keys(sat).length) prices.saturday = sat as any;
-
-    // Domenica
-    const sun = toTier(sunUnico, sunUnicoPrice, sunTriple);
-    if (Object.keys(sun).length) prices.sunday = sun as any;
-
-    // Venerdì (se non weekendizzato)
-    if (!fridayAsWeekend) {
-      const fri = toTier(friUnico, friUnicoPrice, friTriple);
-      if (Object.keys(fri).length) prices.friday = fri as any;
-    }
-
-    // Feriali
-    if (!ferSeparate) {
-      const fer = toTier(ferUnico, ferUnicoPrice, ferTriple);
-      if (Object.keys(fer).length) prices.feriali = fer as any;
-    } else {
-      const perDay: PricesEuro["feriali"]["perDay"] = {};
-      const mon = toTier(ferMonUnico, ferMonUnicoPrice, ferMonTriple);
-      const tue = toTier(ferTueUnico, ferTueUnicoPrice, ferTueTriple);
-      const wed = toTier(ferWedUnico, ferWedUnicoPrice, ferWedTriple);
-      const thu = toTier(ferThuUnico, ferThuUnicoPrice, ferThuTriple);
-      if (Object.keys(mon).length) perDay!.mon = mon as any;
-      if (Object.keys(tue).length) perDay!.tue = tue as any;
-      if (Object.keys(wed).length) perDay!.wed = wed as any;
-      if (Object.keys(thu).length) perDay!.thu = thu as any;
-      if (Object.keys(perDay!).length) prices.feriali = { perDay } as any;
-    }
-
-    return prices;
-  }
-
-  // -----------------------------
-  // Chiamate API
-  // -----------------------------
-  async function callGenerateBundles(opts?: { onlySeats?: boolean }) {
-    if (!adminSecret) {
-      alert("Inserisci l'Admin Secret.");
-      return;
-    }
-    if (!canRun) {
-      alert("Compila tutti i campi obbligatori (titoli, date, orari, capienza).");
-      return;
-    }
-
-    const effectiveTimes = timesInfo.valid;
-    const weekdaySlots = effectiveTimes;
-    const weekendSlots = effectiveTimes;
-
-    const tagsArr = tags
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // L’endpoint accetta una sola base (eventHandle). Per avere titoli visibili corretti,
-    // usiamo la base dei biglietti (bundleTitleBase). I “Seat” erediteranno la stessa base.
-    const payload: any = {
-      source: "manual",
-      dryRun,
-      startDate: dateStart,
-      endDate: dateEnd,
-      weekdaySlots,
-      weekendSlots,
-      fridayAsWeekend,
-      capacityPerSlot,
-      eventHandle: bundleTitleBase,
-      templateSuffix: templateSuffix || undefined,
-      tags: tagsArr.length ? tagsArr : undefined,
-      description: desc || undefined,
-      imageUrl: imageUrl || undefined,
-    };
-
-    // Se vogliamo “solo posti”, NON inviamo i prezzi: il server (versione attuale) salta la creazione se mancano i prezzi.
-    if (!opts?.onlySeats) {
-      payload["prices€"] = buildPricesEuro();
-    }
-
-    try {
-      const res = await fetch("/api/admin/generate-bundles", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-admin-secret": adminSecret,
-        },
-        body: JSON.stringify(payload),
-      });
-
-      let data: any = null;
-      try {
-        data = await res.json();
-      } catch {
-        // può capitare su errori non-json (es. 405/500 senza body json)
-      }
-
-      if (!res.ok) {
-        console.error("Bundles result (HTTP error):", data || res.statusText);
-        alert(
-          `Errore ${res.status}.\n` +
-            (data?.detail ||
-              data?.error ||
-              "Controlla l'Admin Secret e che il payload includa source:'manual'.")
-        );
-        return;
-      }
-
-      console.log("Bundles result:", data);
-      alert(
-        data?.ok
-          ? `OK: seats=${data.summary?.seatsCreated ?? 0}, bundles=${data.summary?.bundlesCreated ?? 0}, variants=${data.summary?.variantsCreated ?? 0}`
-          : `Risposta non OK: ${data?.error || "unknown"}`
-      );
-    } catch (err: any) {
-      console.error("Errore chiamata bundles:", err);
-      alert(`Errore di rete: ${String(err?.message || err)}`);
-    }
-  }
-
-  // -----------------------------
   // TEST automatici (console) per parser orari
   // -----------------------------
   useEffect(() => {
@@ -372,6 +247,125 @@ export default function AdminGeneratorUIV2() {
     ok("bordi", t4.valid.join(",") === "00:00,23:59");
   }, []);
 
+  /* ---------------- API helpers ---------------- */
+
+  function toTier(unico: boolean, unicoPrice: number, triple: Triple): PriceTierEuroLocal | undefined {
+    if (unico) {
+      if (Number.isFinite(unicoPrice) && unicoPrice > 0) return { unico: Number(unicoPrice) };
+      return undefined;
+    }
+    const t: PriceTierEuroLocal = {};
+    if (Number.isFinite(triple.adulto as number) && (triple.adulto as number) > 0) t.adulto = Number(triple.adulto);
+    if (Number.isFinite(triple.bambino as number) && (triple.bambino as number) > 0) t.bambino = Number(triple.bambino);
+    if (Number.isFinite(triple.handicap as number) && (triple.handicap as number) > 0) t.handicap = Number(triple.handicap);
+    if (Object.keys(t).length === 0) return undefined;
+    return t;
+  }
+
+  function buildPricesPayload(): PricesEuroLocal {
+    const prices: PricesEuroLocal = {};
+
+    // Festivi / Sabato / Domenica / Venerdì
+    const holiday = toTier(holidayUnico, holidayUnicoPrice, holidayTriple);
+    if (holiday) prices.holiday = holiday;
+
+    const saturday = toTier(satUnico, satUnicoPrice, satTriple);
+    if (saturday) prices.saturday = saturday;
+
+    const sunday = toTier(sunUnico, sunUnicoPrice, sunTriple);
+    if (sunday) prices.sunday = sunday;
+
+    const friday = fridayAsWeekend ? (saturday || sunday || holiday) : toTier(friUnico, friUnicoPrice, friTriple);
+    if (friday) prices.friday = friday;
+
+    // Feriali
+    if (!ferSeparate) {
+      const fer: PriceTierEuroLocal = toTier(ferUnico, ferUnicoPrice, ferTriple) || {};
+      if (Object.keys(fer).length) prices.feriali = fer as FerialiTierLocal;
+    } else {
+      const perDay: FerialiTierLocal["perDay"] = {};
+      const mon = toTier(ferMonUnico, ferMonUnicoPrice, ferMonTriple);
+      const tue = toTier(ferTueUnico, ferTueUnicoPrice, ferTueTriple);
+      const wed = toTier(ferWedUnico, ferWedUnicoPrice, ferWedTriple);
+      const thu = toTier(ferThuUnico, ferThuUnicoPrice, ferThuTriple);
+      if (mon) perDay!.mon = mon;
+      if (tue) perDay!.tue = tue;
+      if (wed) perDay!.wed = wed;
+      if (thu) perDay!.thu = thu;
+      if (Object.keys(perDay!).length) prices.feriali = { perDay } as FerialiTierLocal;
+    }
+
+    return prices;
+  }
+
+  async function callApiGenerateBundles() {
+    // costruisci slots
+    const all = timesInfo.valid;
+    const excludedSetLocal = new Set(excluded);
+    const dates = allDates.filter((d) => !excludedSetLocal.has(d));
+
+    // Weekday/Weekend split per coerenza con la route
+    const weekdaySlots: string[] = [];
+    const weekendSlots: string[] = [];
+    // Nella UI passiamo sempre tutti gli orari in entrambe le liste: decide la API quale usare per ogni giorno
+    weekdaySlots.push(...all);
+    weekendSlots.push(...all);
+
+    const prices = buildPricesPayload();
+
+    const payload = {
+      source: "manual" as const,
+      dryRun,
+      eventHandle: bundleTitleBase.trim(),
+      startDate: dates[0],
+      endDate: dates[dates.length - 1],
+      weekdaySlots,
+      weekendSlots,
+      fridayAsWeekend,
+      "prices€": prices,
+      exceptionsByDate: {}, // opzionale
+      capacityPerSlot,
+      templateSuffix: templateSuffix || undefined,
+      description: desc || undefined,
+      imageUrl: imageUrl || undefined,
+      tags: (tags || "")
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+    };
+
+    const res = await fetch("/api/admin/generate-bundles", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-admin-secret": adminSecret || "",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    let out: any = null;
+    try {
+      out = await res.json();
+    } catch {
+      console.error("Bundles: risposta non JSON");
+    }
+    console.log("Bundles result:", out || { status: res.status, statusText: res.statusText });
+    if (!res.ok) {
+      alert(`Errore Bundles: ${out?.error || res.status} — ${out?.detail || res.statusText}`);
+    } else {
+      alert(`OK Bundles — created: ${(out?.summary && JSON.stringify(out.summary)) || "preview"}`);
+    }
+  }
+
+  async function callApiGenerateSeats() {
+    // Per coerenza con il flusso attuale, usiamo la stessa route /generate-bundles (manual)
+    // perché in backend la creazione dei Seat è parte dello stesso giro di creazione.
+    await callApiGenerateBundles();
+  }
+
+  // -----------------------------
+  // Render
+  // -----------------------------
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -462,14 +456,8 @@ export default function AdminGeneratorUIV2() {
             <div className="flex items-center justify-between">
               <button
                 disabled={!canRun}
-                onClick={() => {
-                  alert(
-                    "Solo posti: al momento l’endpoint crea Seats + Bundles quando sono presenti i prezzi.\n" +
-                      "Questo bottone evita l’invio dei prezzi (quindi il server potrebbe NON creare nulla se richiede i prezzi)."
-                  );
-                  return callGenerateBundles({ onlySeats: true });
-                }}
                 className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+                onClick={callApiGenerateSeats}
               >
                 Crea posti
               </button>
@@ -645,8 +633,8 @@ export default function AdminGeneratorUIV2() {
             <div className="flex items-center justify-between">
               <button
                 disabled={!canRun}
-                onClick={() => callGenerateBundles()}
                 className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+                onClick={callApiGenerateBundles}
               >
                 Crea biglietti
               </button>
@@ -671,7 +659,7 @@ export default function AdminGeneratorUIV2() {
             <p className="text-sm">
               <b>Prodotto:</b>{" "}
               {bundleTitleBase && sampleDate && sampleTime
-                ? `${sampleTitle}`
+                ? `${bundleTitleBase} — ${sampleDate.split("-").reverse().join("/")} ${sampleTime}`
                 : "(compila titolo, date e orari)"}
             </p>
             <p className="text-sm">
@@ -684,7 +672,8 @@ export default function AdminGeneratorUIV2() {
   );
 }
 
-// ---- Sotto-componenti ----
+/* ---------------- Sotto-componenti ---------------- */
+
 function SectionPrices({
   title,
   unico,
