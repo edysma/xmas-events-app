@@ -2,7 +2,7 @@
 // Helpers per creare/riusare Posti (Seat Unit) e Biglietti (Bundle) e collegare componenti.
 // Allineato a Admin GraphQL 2024-07/2024-10
 
-import { adminFetchGQL, getDefaultLocationId } from "@/lib/shopify-admin";
+import { adminFetchGQL, getDefaultLocationId, publishProductToPublication } from "@/lib/shopify-admin";
 
 // --- Tipi locali ---
 export type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
@@ -156,16 +156,6 @@ const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
   }
 `;
 
-// Pubblicazione al canale "Negozio online"
-const M_PUBLISHABLE_PUBLISH = /* GraphQL */ `
-  mutation PublishOne($id: ID!, $publicationId: ID!) {
-    publishablePublish(id: $id, input: { publicationId: $publicationId }) {
-      publishable { id }
-      userErrors { field message }
-    }
-  }
-`;
-
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
@@ -181,25 +171,8 @@ async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   return node;
 }
 
-// legge l'ID pubblicazione del canale "Negozio online" da ENV (impostato su Vercel)
-function getOnlineStorePublicationIdOrThrow(): string {
-  const id = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
-  if (!id) {
-    throw new Error(
-      "SHOPIFY_ONLINE_STORE_PUBLICATION_ID mancante. Impostalo nelle Environment Variables Vercel."
-    );
-  }
-  return id;
-}
-
 async function publishProductToOnlineStore(productId: string, pubId?: string) {
-  const publicationId = pubId || getOnlineStorePublicationIdOrThrow();
-  const res = await adminFetchGQL<{ publishablePublish: { userErrors?: { message: string }[] } }>(
-    M_PUBLISHABLE_PUBLISH,
-    { id: productId, publicationId }
-  );
-  const errs = (res as any).publishablePublish?.userErrors || [];
-  if (errs.length) throw new Error(`publishablePublish error: ${errs.map((e: any) => e.message).join(" | ")}`);
+  await publishProductToPublication(productId, pubId);
 }
 
 async function createProductActive(opts: {
