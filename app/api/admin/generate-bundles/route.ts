@@ -238,9 +238,6 @@ async function generateFromFeed(req: NextRequest, body: any) {
   const locationId = body.locationId ?? null;
   const prices = body["prices€"] as PricesEuro;
 
-  // lettura opzionale della publication per "negozio online"
-  const publishToPublicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || undefined;
-
   const getTierFor = (dt: DayType): PriceTierEuro | undefined => {
     if (dt === "holiday") return prices.holiday;
     if (dt === "saturday") return prices.saturday;
@@ -263,10 +260,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
 
       // crea/riusa Seat
       const seat = await ensureSeatUnit({
-        date, time, titleBase: eventHandle, tags, description, templateSuffix,
-        dryRun: false,
-        status: "ACTIVE",
-        publishToPublicationId,
+        date, time, titleBase: eventHandle, tags, description, templateSuffix, dryRun: false,
       });
       if (seat.created) seatsCreated++;
 
@@ -279,10 +273,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
       // modalità: dal feed impostiamo "triple" (Adulto/Bambino/Handicap)
       const bundle = await ensureBundle({
         eventHandle, date, time, titleBase: eventHandle, templateSuffix, tags, description,
-        dayType: dt, mode: "triple", "priceTier€": tier,
-        dryRun: false,
-        status: "ACTIVE",
-        publishToPublicationId,
+        dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false,
       });
       if (bundle.createdProduct) bundlesCreated++;
       variantsCreated += bundle.createdVariants ?? 0;
@@ -381,7 +372,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    /* ------- ramo MANUAL ------- */
+    /* ------- ramo MANUAL esistente ------- */
 
     const input = body as ManualInput & {
       dryRun?: boolean;
@@ -408,9 +399,6 @@ export async function POST(req: NextRequest) {
     let bundlesCreated = 0;
     let variantsCreated = 0;
 
-    // lettura opzionale della publication per "negozio online"
-    const publishToPublicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || undefined;
-
     for (const date of dates) {
       const dt = dayTypeOf(date, holidays);
 
@@ -434,11 +422,7 @@ export async function POST(req: NextRequest) {
 
         // Seat Unit
         const seat = await ensureSeatUnit({
-          date, time, titleBase: input.eventHandle, tags, description, templateSuffix,
-          dryRun,
-          status: "ACTIVE",
-          publishToPublicationId,
-          imageUrl,
+          date, time, titleBase: input.eventHandle, tags, description, templateSuffix, dryRun,
         });
         if (!dryRun && seat.created) seatsCreated++;
 
@@ -457,9 +441,6 @@ export async function POST(req: NextRequest) {
           templateSuffix, tags, description,
           dayType: dt, mode, "priceTier€": tier,
           dryRun,
-          status: "ACTIVE",
-          publishToPublicationId,
-          imageUrl,
         });
         if (!dryRun) {
           if (bundle.createdProduct) bundlesCreated++;
