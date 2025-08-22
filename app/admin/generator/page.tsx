@@ -3,34 +3,57 @@
 import { useMemo, useState, useEffect } from "react";
 
 /**
- * Admin Generator UI v2
- * - Salva l’admin secret in localStorage
- * - Chiama:
- *   - POST /api/admin/generate-bundles  (source:"manual")
- *   - POST /api/admin/generate-seats    (solo per capienza; se non esiste l’endpoint, il bottone mostrerà errore 405)
- * - Mostra un modale con l’esito
+ * Admin Generator — UI v2
+ * - Persistenza Admin Secret in localStorage
+ * - Integrazione con /api/admin/generate-bundles (source:"manual")
+ * - NESSUNA abbreviazione. File completo.
  */
 
 const LS_ADMIN_SECRET = "sinflora_admin_secret";
 
-type Triple = { adulto?: number; bambino?: number; handicap?: number };
-type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
+/* ----------------------------- Tipi locali (frontend) ----------------------------- */
 
-type PriceTierEuro = { unico?: number; adulto?: number; bambino?: number; handicap?: number };
+type Triple = { adulto?: number; bambino?: number; handicap?: number };
+
+type PriceTierEuro = {
+  unico?: number;
+  adulto?: number;
+  bambino?: number;
+  handicap?: number;
+};
+
 type PricesEuro = {
   holiday?: PriceTierEuro;
   saturday?: PriceTierEuro;
   sunday?: PriceTierEuro;
   friday?: PriceTierEuro;
-  feriali?: (PriceTierEuro & {
+  feriali?: PriceTierEuro & {
     perDay?: {
       mon?: PriceTierEuro;
       tue?: PriceTierEuro;
       wed?: PriceTierEuro;
       thu?: PriceTierEuro;
     };
-  });
+  };
 };
+
+type GenerateBundlesResponse = {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+  summary?: {
+    seatsCreated: number;
+    bundlesCreated: number;
+    variantsCreated: number;
+    inventoryAdjusted?: number;
+    relationshipsUpserted?: number;
+    pricesUpdated?: number;
+  };
+  warnings?: string[];
+  preview?: any[];
+};
+
+/* ----------------------------- Component ----------------------------- */
 
 export default function AdminGeneratorUIV2() {
   // -----------------------------
@@ -43,14 +66,14 @@ export default function AdminGeneratorUIV2() {
   const [excluded, setExcluded] = useState<string[]>([]);
   const [timesText, setTimesText] = useState("");
 
-  const [productTitleBase, setProductTitleBase] = useState(""); // Posti (nascosti)
+  const [productTitleBase, setProductTitleBase] = useState(""); // Posti (nascosti) — usato come eventHandle lato API
   const [capacityPerSlot, setCapacityPerSlot] = useState<number>(0);
 
   const [bundleTitleBase, setBundleTitleBase] = useState(""); // Biglietti (visibili)
   const [dryRun, setDryRun] = useState(true);
   const [fridayAsWeekend, setFridayAsWeekend] = useState(false);
 
-  // Prezzi
+  // Prezzi — toggle "unico" + tripla (Adulto/Bambino/Handicap)
   const [holidayUnico, setHolidayUnico] = useState(false);
   const [holidayUnicoPrice, setHolidayUnicoPrice] = useState<number>(0);
   const [holidayTriple, setHolidayTriple] = useState<Triple>({});
@@ -95,6 +118,9 @@ export default function AdminGeneratorUIV2() {
   const [imageUrl, setImageUrl] = useState("");
   const [desc, setDesc] = useState("");
   const [tags, setTags] = useState("");
+
+  // Modale feedback
+  const [modalMsg, setModalMsg] = useState<string | null>(null);
 
   // -----------------------------
   // Persistenza Admin Secret
@@ -163,7 +189,8 @@ export default function AdminGeneratorUIV2() {
     const invalid: string[] = [];
     const valid: string[] = [];
     for (const t of deduped) {
-      if (isValidHHMM(t)) valid.push(t); else invalid.push(t);
+      if (isValidHHMM(t)) valid.push(t);
+      else invalid.push(t);
     }
     const sortedValid = sortHHMM(valid);
     return { valid: sortedValid, invalid, duplicatesRemoved: raw.length - deduped.length };
@@ -181,7 +208,7 @@ export default function AdminGeneratorUIV2() {
     effectiveDates.length > 0 &&
     timesInfo.valid.length > 0 &&
     capacityPerSlot > 0;
-  const canRun = Boolean(canRunBase && timesInfo.invalid.length === 0);
+  const canRun = Boolean(canRunBase && timesInfo.invalid.length === 0 && adminSecret.trim().length > 0);
 
   const comboCount = useMemo(
     () => effectiveDates.length * timesInfo.valid.length,
@@ -220,21 +247,28 @@ export default function AdminGeneratorUIV2() {
   }
 
   // -----------------------------
-  // Helpers prezzi (UI → payload)
+  // Build prezzi per API body
   // -----------------------------
-  function toTier(unico: boolean, unicoPrice: number, tri: Triple): PriceTierEuro | undefined {
+  function toTier(unico: boolean, unicoPrice: number, triple: Triple): PriceTierEuro | undefined {
     if (unico) {
-      return typeof unicoPrice === "number" && unicoPrice > 0 ? { unico: unicoPrice } : undefined;
+      if (typeof unicoPrice === "number" && unicoPrice > 0) return { unico: round2(unicoPrice) };
+      return undefined;
     }
-    const t: PriceTierEuro = {};
-    if (typeof tri.adulto === "number" && tri.adulto > 0) t.adulto = tri.adulto;
-    if (typeof tri.bambino === "number" && tri.bambino > 0) t.bambino = tri.bambino;
-    if (typeof tri.handicap === "number" && tri.handicap > 0) t.handicap = tri.handicap;
-    return Object.keys(t).length ? t : undefined;
+    const p: PriceTierEuro = {};
+    if (typeof triple?.adulto === "number" && triple.adulto > 0) p.adulto = round2(triple.adulto);
+    if (typeof triple?.bambino === "number" && triple.bambino > 0) p.bambino = round2(triple.bambino);
+    if (typeof triple?.handicap === "number" && triple.handicap > 0) p.handicap = round2(triple.handicap);
+    if (!("adulto" in p) && !("bambino" in p) && !("handicap" in p)) return undefined;
+    return p;
+  }
+
+  function round2(v: number) {
+    return Math.round((v + Number.EPSILON) * 100) / 100;
   }
 
   function buildPrices(): PricesEuro {
     const prices: PricesEuro = {};
+
     const hol = toTier(holidayUnico, holidayUnicoPrice, holidayTriple);
     if (hol) prices.holiday = hol;
 
@@ -244,9 +278,7 @@ export default function AdminGeneratorUIV2() {
     const sun = toTier(sunUnico, sunUnicoPrice, sunTriple);
     if (sun) prices.sunday = sun;
 
-    if (fridayAsWeekend) {
-      prices.friday = sat || sun || hol;
-    } else {
+    if (!fridayAsWeekend) {
       const fri = toTier(friUnico, friUnicoPrice, friTriple);
       if (fri) prices.friday = fri;
     }
@@ -255,77 +287,96 @@ export default function AdminGeneratorUIV2() {
       const fer = toTier(ferUnico, ferUnicoPrice, ferTriple);
       if (fer) prices.feriali = fer as any;
     } else {
-      const perDay: PricesEuro["feriali"]["perDay"] = {};
+      // per-day: lun-mar-mer-gio
+      const perDay: NonNullable<NonNullable<PricesEuro["feriali"]>["perDay"]> = {};
       const mon = toTier(ferMonUnico, ferMonUnicoPrice, ferMonTriple);
       const tue = toTier(ferTueUnico, ferTueUnicoPrice, ferTueTriple);
       const wed = toTier(ferWedUnico, ferWedUnicoPrice, ferWedTriple);
       const thu = toTier(ferThuUnico, ferThuUnicoPrice, ferThuTriple);
-      if (mon) perDay!.mon = mon;
-      if (tue) perDay!.tue = tue;
-      if (wed) perDay!.wed = wed;
-      if (thu) perDay!.thu = thu;
-      prices.feriali = { ...(toTier(ferUnico, ferUnicoPrice, ferTriple) || {}), perDay } as any;
+      if (mon) perDay.mon = mon;
+      if (tue) perDay.tue = tue;
+      if (wed) perDay.wed = wed;
+      if (thu) perDay.thu = thu;
+
+      if (Object.keys(perDay).length) {
+        prices.feriali = { ...(prices.feriali || {}), perDay };
+      }
     }
 
     return prices;
   }
 
-  // -----------------------------
-  // Chiamate API
-  // -----------------------------
-  async function callGenerateBundles() {
-    const url = "/api/admin/generate-bundles";
-    const body = {
-      source: "manual",
-      eventHandle: productTitleBase || "evento",
-      startDate: effectiveDates[0],
-      endDate: effectiveDates[effectiveDates.length - 1],
-      weekdaySlots: timesInfo.valid, // usiamo gli stessi orari per semplicità
-      weekendSlots: timesInfo.valid,
-      "prices€": buildPrices(),
-      fridayAsWeekend,
-      capacityPerSlot,
-      locationId: undefined,
-      templateSuffix: templateSuffix || undefined,
-      description: desc || undefined,
-      imageUrl: imageUrl || undefined,
-      tags: (tags || "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-      dryRun,
-    };
+  // Slots separati per weekday/weekend
+  const weekdaySlots = useMemo(() => {
+    // Lunedì-Giovedì + (Venerdì se non weekend)
+    return timesInfo.valid;
+  }, [timesInfo.valid]);
 
+  const weekendSlots = useMemo(() => {
+    // Sabato/Domenica/Festivi + (Venerdì se fridayAsWeekend)
+    return timesInfo.valid;
+  }, [timesInfo.valid]);
+
+  // -----------------------------
+  // Call API generate-bundles (manual)
+  // -----------------------------
+  async function handleCreateBundles() {
+    if (!canRun) return;
     try {
-      const res = await fetch(url, {
+      const prices = buildPrices();
+
+      const body = {
+        source: "manual",
+        dryRun,
+        eventHandle: productTitleBase, // lato API usiamo eventHandle come base
+        startDate: dateStart,
+        endDate: dateEnd,
+        weekdaySlots,
+        weekendSlots,
+        "prices€": prices,
+        fridayAsWeekend,
+        capacityPerSlot,
+        templateSuffix: templateSuffix || undefined,
+        imageUrl: imageUrl || undefined,
+        description: desc || undefined,
+        tags: tags
+          ? tags
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean)
+          : undefined,
+      };
+
+      const res = await fetch("/api/admin/generate-bundles", {
         method: "POST",
         headers: {
-          "content-type": "application/json",
+          "Content-Type": "application/json",
           "x-admin-secret": adminSecret || "",
         },
         body: JSON.stringify(body),
       });
 
-      let data: any = null;
+      let data: GenerateBundlesResponse | null = null;
       try {
-        data = await res.json();
+        data = (await res.json()) as GenerateBundlesResponse;
       } catch {
-        // può capitare in caso 405 generate-seats o errori senza body
+        // risposta non-JSON
       }
 
-      if (!res.ok) {
-        alert(
-          `Errore Bundles: ${data?.error || res.status} — ${data?.detail || res.statusText || "no detail"}`
-        );
-        console.error("Bundles result:", data || res.statusText);
+      if (!res.ok || !data?.ok) {
+        const errCode = data?.error || `${res.status}`;
+        const errDetail = data?.detail || res.statusText || "Errore sconosciuto";
+        console.error("Bundles result (ERR):", data || res);
+        setModalMsg(`Errore Bundles: ${errCode} — ${errDetail}`);
         return;
       }
 
-      alert(`OK Bundles — created: ${JSON.stringify(data?.summary || {})}`);
       console.log("Bundles result:", data);
+      const s = data.summary || { seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 };
+      setModalMsg(`OK Bundles — created: ${JSON.stringify(s)}`);
     } catch (err: any) {
       console.error("Errore Bundles:", err);
-      alert(`Errore Bundles: ${String(err?.message || err)}`);
+      setModalMsg(`Errore Bundles: ${String(err?.message || err)}`);
     }
   }
 
@@ -347,9 +398,6 @@ export default function AdminGeneratorUIV2() {
     ok("bordi", t4.valid.join(",") === "00:00,23:59");
   }, []);
 
-  // -----------------------------
-  // UI
-  // -----------------------------
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -440,12 +488,12 @@ export default function AdminGeneratorUIV2() {
             <div className="flex items-center justify-between">
               <button
                 disabled={!canRun}
-                onClick={callGenerateBundles}
                 className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+                onClick={handleCreateBundles}
               >
-                Crea posti
+                Crea posti + biglietti
               </button>
-              <span className="text-xs text-gray-600">Stima posti: {comboCount || 0}</span>
+              <span className="text-xs text-gray-600">Stima posti/biglietti: {comboCount || 0}</span>
             </div>
           </div>
 
@@ -532,16 +580,44 @@ export default function AdminGeneratorUIV2() {
               ) : (
                 <div className="grid md:grid-cols-2 gap-3">
                   <DayCard title="Lunedì">
-                    <SectionPricesInner unico={ferMonUnico} setUnico={setFerMonUnico} unicoPrice={ferMonUnicoPrice} setUnicoPrice={setFerMonUnicoPrice} triple={ferMonTriple} setTriple={setFerMonTriple} />
+                    <SectionPricesInner
+                      unico={ferMonUnico}
+                      setUnico={setFerMonUnico}
+                      unicoPrice={ferMonUnicoPrice}
+                      setUnicoPrice={setFerMonUnicoPrice}
+                      triple={ferMonTriple}
+                      setTriple={setFerMonTriple}
+                    />
                   </DayCard>
                   <DayCard title="Martedì">
-                    <SectionPricesInner unico={ferTueUnico} setUnico={setFerTueUnico} unicoPrice={ferTueUnicoPrice} setUnicoPrice={setFerTueUnicoPrice} triple={ferTueTriple} setTriple={setFerTueTriple} />
+                    <SectionPricesInner
+                      unico={ferTueUnico}
+                      setUnico={setFerTueUnico}
+                      unicoPrice={ferTueUnicoPrice}
+                      setUnicoPrice={setFerTueUnicoPrice}
+                      triple={ferTueTriple}
+                      setTriple={setFerTueTriple}
+                    />
                   </DayCard>
                   <DayCard title="Mercoledì">
-                    <SectionPricesInner unico={ferWedUnico} setUnico={setFerWedUnico} unicoPrice={ferWedUnicoPrice} setUnicoPrice={setFerWedUnicoPrice} triple={ferWedTriple} setTriple={setFerWedTriple} />
+                    <SectionPricesInner
+                      unico={ferWedUnico}
+                      setUnico={setFerWedUnico}
+                      unicoPrice={ferWedUnicoPrice}
+                      setUnicoPrice={setFerWedUnicoPrice}
+                      triple={ferWedTriple}
+                      setTriple={setFerWedTriple}
+                    />
                   </DayCard>
                   <DayCard title="Giovedì">
-                    <SectionPricesInner unico={ferThuUnico} setUnico={setFerThuUnico} unicoPrice={ferThuUnicoPrice} setUnicoPrice={setFerThuUnicoPrice} triple={ferThuTriple} setTriple={setFerThuTriple} />
+                    <SectionPricesInner
+                      unico={ferThuUnico}
+                      setUnico={setFerThuUnico}
+                      unicoPrice={ferThuUnicoPrice}
+                      setUnicoPrice={setFerThuUnicoPrice}
+                      triple={ferThuTriple}
+                      setTriple={setFerThuTriple}
+                    />
                   </DayCard>
                 </div>
               )}
@@ -589,8 +665,8 @@ export default function AdminGeneratorUIV2() {
             <div className="flex items-center justify-between">
               <button
                 disabled={!canRun}
-                onClick={callGenerateBundles}
                 className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+                onClick={handleCreateBundles}
               >
                 Crea biglietti
               </button>
@@ -615,7 +691,7 @@ export default function AdminGeneratorUIV2() {
             <p className="text-sm">
               <b>Prodotto:</b>{" "}
               {bundleTitleBase && sampleDate && sampleTime
-                ? `${sampleTitle}`
+                ? `${bundleTitleBase} — ${sampleDate.split("-").reverse().join("/")} ${sampleTime}`
                 : "(compila titolo, date e orari)"}
             </p>
             <p className="text-sm">
@@ -623,12 +699,30 @@ export default function AdminGeneratorUIV2() {
             </p>
           </div>
         </section>
+
+        {/* Modale semplice */}
+        {modalMsg && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-lg p-5 max-w-lg w-full space-y-3">
+              <div className="text-sm whitespace-pre-wrap">{modalMsg}</div>
+              <div className="text-right">
+                <button
+                  onClick={() => setModalMsg(null)}
+                  className="rounded-xl border px-3 py-2"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-// ---- Sotto-componenti ----
+/* ----------------------------- Sotto-componenti ----------------------------- */
+
 function SectionPrices({
   title,
   unico,
