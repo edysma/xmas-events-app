@@ -1,247 +1,263 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 
-type Summary = Record<string, number>;
-type PreviewItem = any;
+/**
+ * UI target (solo interfaccia). Nessun accesso a localStorage / window.
+ * La logica di chiamata API verrà aggiunta nello Step 3.
+ */
 
-const LS_SECRET = "sinflora_admin_secret";
-const LS_LAST_BODY = "sinflora_admin_last_body";
-const API_PATH = "/api/admin/generate-bundles";
+export default function AdminGeneratorUIV2() {
+  // -----------------------------
+  // Stato principale
+  // -----------------------------
+  const [dateStart, setDateStart] = useState("");
+  const [dateEnd, setDateEnd] = useState("");
+  const [excluded, setExcluded] = useState<string[]>([]);
+  const [timesText, setTimesText] = useState("");
 
-// Util: safe JSON parse
-function tryParseJSON<T = any>(txt: string, fallback: T): T {
-  try {
-    const v = JSON.parse(txt);
-    return v as T;
-  } catch {
-    return fallback;
-  }
-}
-function pretty(obj: any) {
-  try {
-    return JSON.stringify(obj, null, 2);
-  } catch {
-    return String(obj ?? "");
-  }
-}
+  const [productTitleBase, setProductTitleBase] = useState(""); // Posti (nascosti)
+  const [capacityPerSlot, setCapacityPerSlot] = useState<number>(0);
 
-export default function AdminGeneratePage() {
-  // ---------- Auth ----------
-  const [adminSecret, setAdminSecret] = useState<string>("");
-
-  // ---------- Manual fields (UI target) ----------
+  const [bundleTitleBase, setBundleTitleBase] = useState(""); // Biglietti (visibili)
   const [dryRun, setDryRun] = useState(true);
-  const [eventHandle, setEventHandle] = useState<string>("viaggio-incantato");
+  const [fridayAsWeekend, setFridayAsWeekend] = useState(false);
 
-  const [startDate, setStartDate] = useState<string>("2025-12-05");
-  const [endDate, setEndDate] = useState<string>("2025-12-06");
+  // Prezzi — toggle "unico" + tripla (Adulto/Bambino/Handicap)
+  type Triple = { adulto?: number; bambino?: number; handicap?: number };
 
-  const [weekdaySlots, setWeekdaySlots] = useState<string>("11:00\n11:30");
-  const [weekendSlots, setWeekendSlots] = useState<string>("11:00\n11:30");
-  const [fridayAsWeekend, setFridayAsWeekend] = useState<boolean>(true);
+  const [holidayUnico, setHolidayUnico] = useState(false);
+  const [holidayUnicoPrice, setHolidayUnicoPrice] = useState<number>(0);
+  const [holidayTriple, setHolidayTriple] = useState<Triple>({});
 
-  const [capacityPerSlot, setCapacityPerSlot] = useState<number>(50);
+  const [satUnico, setSatUnico] = useState(false);
+  const [satUnicoPrice, setSatUnicoPrice] = useState<number>(0);
+  const [satTriple, setSatTriple] = useState<Triple>({});
 
-  // Metadati prodotto
-  const [templateSuffix, setTemplateSuffix] = useState<string>("bundle");
-  const [tags, setTags] = useState<string>("Bundle,SeatUnit,Sinflora");
-  const [description, setDescription] = useState<string>("Biglietto evento");
+  const [sunUnico, setSunUnico] = useState(false);
+  const [sunUnicoPrice, setSunUnicoPrice] = useState<number>(0);
+  const [sunTriple, setSunTriple] = useState<Triple>({});
 
-  // Prezzi JSON (aderente all’API)
-  const defaultPrices = {
-    feriali: { adulto: 12, bambino: 8, handicap: 12 },
-    friday: { adulto: 12, bambino: 8, handicap: 12 },
-    saturday: { adulto: 14, bambino: 9, handicap: 14 },
-    sunday: { adulto: 14, bambino: 9, handicap: 14 },
-    holiday: { adulto: 16, bambino: 10, handicap: 16 },
-  };
-  const [pricesJSON, setPricesJSON] = useState<string>(pretty(defaultPrices));
+  const [friUnico, setFriUnico] = useState(false);
+  const [friUnicoPrice, setFriUnicoPrice] = useState<number>(0);
+  const [friTriple, setFriTriple] = useState<Triple>({});
 
-  // Eccezioni opzionali
-  const [exceptionsByDateJSON, setExceptionsByDateJSON] = useState<string>("{}");
+  // Feriali — modalità generale o per-giorno (Lun–Gio)
+  const [ferSeparate, setFerSeparate] = useState(false);
+  const [ferUnico, setFerUnico] = useState(false); // generale
+  const [ferUnicoPrice, setFerUnicoPrice] = useState<number>(0);
+  const [ferTriple, setFerTriple] = useState<Triple>({}); // generale
 
-  // ---------- Output ----------
-  const [pending, setPending] = useState<boolean>(false);
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [preview, setPreview] = useState<PreviewItem[]>([]);
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [error, setError] = useState<string>("");
+  // Per-giorno: Lun(1) Mar(2) Mer(3) Gio(4)
+  const [ferMonUnico, setFerMonUnico] = useState(false);
+  const [ferMonUnicoPrice, setFerMonUnicoPrice] = useState<number>(0);
+  const [ferMonTriple, setFerMonTriple] = useState<Triple>({});
 
-  // ---------- Persist piccoli comfort ----------
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const s = window.localStorage.getItem(LS_SECRET);
-      if (s) setAdminSecret(s);
-    } catch {}
-  }, []);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(LS_SECRET, adminSecret ?? "");
-    } catch {}
-  }, [adminSecret]);
+  const [ferTueUnico, setFerTueUnico] = useState(false);
+  const [ferTueUnicoPrice, setFerTueUnicoPrice] = useState<number>(0);
+  const [ferTueTriple, setFerTueTriple] = useState<Triple>({});
 
-  // ---------- Helpers ----------
-  function parseLines(txt: string) {
-    return txt
-      .split(/\r?\n/g)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
+  const [ferWedUnico, setFerWedUnico] = useState(false);
+  const [ferWedUnicoPrice, setFerWedUnicoPrice] = useState<number>(0);
+  const [ferWedTriple, setFerWedTriple] = useState<Triple>({});
 
-  function buildBody() {
-    const prices = tryParseJSON(pricesJSON, defaultPrices);
-    const tagsArr = tags
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
+  const [ferThuUnico, setFerThuUnico] = useState(false);
+  const [ferThuUnicoPrice, setFerThuUnicoPrice] = useState<number>(0);
+  const [ferThuTriple, setFerThuTriple] = useState<Triple>({});
 
-    const body: any = {
-      source: "manual",
-      eventHandle,
-      startDate,
-      endDate,
-      weekdaySlots: parseLines(weekdaySlots),
-      weekendSlots: parseLines(weekendSlots),
-      fridayAsWeekend,
-      capacityPerSlot,
-      // niente locationId: lo risolve il backend da DEFAULT_LOCATION_ID
-      templateSuffix: templateSuffix || undefined,
-      tags: tagsArr.length ? tagsArr : undefined,
-      description: description || undefined,
-      "prices€": prices,
-      exceptionsByDate: tryParseJSON(exceptionsByDateJSON, undefined),
-      dryRun,
-    };
-    return body;
-  }
+  // Dettagli prodotto
+  const [templateSuffix, setTemplateSuffix] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
+  const [desc, setDesc] = useState("");
+  const [tags, setTags] = useState("");
 
-  async function doCall() {
-    setPending(true);
-    setSummary(null);
-    setPreview([]);
-    setWarnings([]);
-    setError("");
-
-    const body = buildBody();
-
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.setItem(LS_LAST_BODY, pretty(body));
-      } catch {}
+  // -----------------------------
+  // Helpers date/orari
+  // -----------------------------
+  function listDatesBetween(start: string, end: string): string[] {
+    if (!start || !end) return [];
+    const out: string[] = [];
+    const s = new Date(start + "T12:00:00+01:00");
+    const e = new Date(end + "T12:00:00+01:00");
+    for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      out.push(`${y}-${m}-${day}`);
     }
+    return out;
+  }
+  function getDowRome(dateStr: string): number {
+    const d = new Date(dateStr + "T12:00:00+01:00");
+    // 0=Dom .. 6=Sab
+    return d.getDay();
+  }
 
-    try {
-      const res = await fetch(API_PATH, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-admin-secret": adminSecret || "",
-        },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-
-      if (!res.ok || data?.ok === false) {
-        setError(data?.detail || data?.error || `HTTP ${res.status}`);
-        return;
+  // Validazione orari HH:MM (24h)
+  const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  function isValidHHMM(s: string) {
+    return HHMM.test(s);
+  }
+  function sortHHMM(arr: string[]): string[] {
+    return [...arr].sort((a, b) => {
+      const [ah, am] = a.split(":").map(Number);
+      const [bh, bm] = b.split(":").map(Number);
+      return ah * 60 + am - (bh * 60 + bm);
+    });
+  }
+  function parseTimesWithValidation(txt: string): { valid: string[]; invalid: string[]; duplicatesRemoved: number } {
+    const raw = txt.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const t of raw) {
+      if (!seen.has(t)) {
+        seen.add(t);
+        deduped.push(t);
       }
-      setSummary(data?.summary || null);
-      setPreview(Array.isArray(data?.preview) ? data.preview : []);
-      setWarnings(Array.isArray(data?.warnings) ? data.warnings : []);
-    } catch (e: any) {
-      setError(String(e?.message || e));
-    } finally {
-      setPending(false);
     }
+    const invalid: string[] = [];
+    const valid: string[] = [];
+    for (const t of deduped) {
+      if (isValidHHMM(t)) valid.push(t); else invalid.push(t);
+    }
+    const sortedValid = sortHHMM(valid);
+    return { valid: sortedValid, invalid, duplicatesRemoved: raw.length - deduped.length };
   }
 
-  async function onPreview() {
-    const was = dryRun;
-    try {
-      setDryRun(true);
-      await doCall();
-    } finally {
-      setDryRun(was);
+  // Calcoli memoizzati
+  const allDates = useMemo(() => listDatesBetween(dateStart, dateEnd), [dateStart, dateEnd]);
+  const excludedSet = useMemo(() => new Set(excluded), [excluded]);
+  const effectiveDates = useMemo(() => allDates.filter((d) => !excludedSet.has(d)), [allDates, excludedSet]);
+  const timesInfo = useMemo(() => parseTimesWithValidation(timesText), [timesText]);
+
+  const canRunBase =
+    productTitleBase.trim() &&
+    bundleTitleBase.trim() &&
+    effectiveDates.length > 0 &&
+    timesInfo.valid.length > 0 &&
+    capacityPerSlot > 0;
+  const canRun = Boolean(canRunBase && timesInfo.invalid.length === 0);
+
+  const comboCount = useMemo(
+    () => effectiveDates.length * timesInfo.valid.length,
+    [effectiveDates.length, timesInfo.valid.length]
+  );
+
+  // Sample carrello
+  const sampleDate = effectiveDates[0] || "";
+  const sampleTime = timesInfo.valid[0] || "";
+  function isUnicoForSample(dateStr: string): boolean {
+    if (!dateStr) return false;
+    const dow = getDowRome(dateStr);
+    if (dow === 6) return satUnico; // sab
+    if (dow === 0) return sunUnico; // dom
+    if (dow === 5) return fridayAsWeekend ? satUnico : friUnico; // ven
+    if (dow >= 1 && dow <= 4) {
+      if (ferSeparate) {
+        if (dow === 1) return ferMonUnico;
+        if (dow === 2) return ferTueUnico;
+        if (dow === 3) return ferWedUnico;
+        if (dow === 4) return ferThuUnico;
+      }
+      return ferUnico; // generale Lun–Gio
     }
+    return false;
   }
-  async function onCreate() {
-    const was = dryRun;
-    try {
-      setDryRun(false);
-      await doCall();
-    } finally {
-      setDryRun(was);
-    }
+  const sampleTitle =
+    bundleTitleBase && sampleDate && sampleTime
+      ? `${bundleTitleBase} — ${sampleDate.split("-").reverse().join("/")} ${sampleTime}`
+      : "(compila titolo, date e orari)";
+  const sampleVariant = isUnicoForSample(sampleDate) ? "Biglietto unico" : "Adulto / Bambino / Handicap";
+
+  // UI: toggle esclusione date
+  function toggleExclude(d: string) {
+    setExcluded((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
   }
 
-  // Ultimo payload (solo client)
-  const [lastPayload, setLastPayload] = useState<string>("");
+  // -----------------------------
+  // TEST automatici (console) per parser orari
+  // -----------------------------
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const v = window.localStorage.getItem(LS_LAST_BODY) || "";
-      setLastPayload(v);
-    } catch {
-      setLastPayload("");
-    }
-  }, [summary, preview, warnings, error]);
+    const ok = (name: string, cond: boolean) => console.assert(cond, `Test fallito: ${name}`);
+    const t1 = parseTimesWithValidation("");
+    ok("vuoto", t1.valid.length === 0 && t1.invalid.length === 0);
 
-  // Preview row (manual-only shape)
-  function renderPreviewRow(item: any, idx: number) {
-    const adult = item?.variantMap?.adulto || "";
-    const kid = item?.variantMap?.bambino || "";
-    const handicap = item?.variantMap?.handicap || "";
-    return (
-      <tr key={idx} className="border-b last:border-0">
-        <td className="py-2 px-2">{String(item?.date ?? "")}</td>
-        <td className="py-2 px-2">{String(item?.time ?? "")}</td>
-        <td className="py-2 px-2">{String(item?.dayType ?? "")}</td>
-        <td className="py-2 px-2 text-xs break-all">{String(item?.seatProductId ?? "-")}</td>
-        <td className="py-2 px-2 text-xs break-all">{String(item?.bundleProductId ?? "-")}</td>
-        <td className="py-2 px-2 text-xs break-all">{adult || "-"}</td>
-        <td className="py-2 px-2 text-xs break-all">{kid || "-"}</td>
-        <td className="py-2 px-2 text-xs break-all">{handicap || "-"}</td>
-      </tr>
-    );
-  }
+    const t2 = parseTimesWithValidation("10:00\n11:30\n11:30\n25:99\n");
+    ok("dup e invalid", t2.valid.join(",") === "10:00,11:30" && t2.invalid[0] === "25:99");
+
+    const t3 = parseTimesWithValidation("11:30\n09:00\n");
+    ok("ordinamento", t3.valid.join(",") === "09:00,11:30");
+
+    const t4 = parseTimesWithValidation("00:00\n23:59");
+    ok("bordi", t4.valid.join(",") === "00:00,23:59");
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-6xl mx-auto space-y-6">
         <header className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold">Sinflora — Admin Generate</h1>
-          <div className="flex items-center gap-2">
-            <input
-              type="password"
-              value={adminSecret}
-              onChange={(e) => setAdminSecret(e.target.value)}
-              className="rounded-xl border px-3 py-2 w-64"
-              placeholder="Admin secret"
-            />
-            <label className="text-sm inline-flex items-center gap-2">
-              <input className="size-4" type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
-              Dry‑run
-            </label>
-          </div>
+          <h1 className="text-xl font-semibold">Sinflora — Admin Generator (UI v2)</h1>
+          <label className="text-sm inline-flex items-center gap-2">
+            <input className="size-4" type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
+            Dry‑run
+          </label>
         </header>
 
-        {/* Manuale (UI target) */}
-        <div className="bg-white rounded-2xl shadow-sm border p-4">
-          <div className="grid md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-sm text-gray-600">Event handle</label>
-              <input value={eventHandle} onChange={(e) => setEventHandle(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+        <section className="grid lg:grid-cols-2 gap-6">
+          {/* Colonna SX */}
+          <div className="bg-white rounded-2xl shadow-sm border p-5 space-y-4">
+            <h3 className="font-medium">🪑 Posti (nascosti)</h3>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm text-gray-600">Data inizio</label>
+                <input type="date" value={dateStart} onChange={(e) => setDateStart(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-600">Data fine</label>
+                <input type="date" value={dateEnd} onChange={(e) => setDateEnd(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+              </div>
             </div>
+
+            {/* Calendario semplice (grid di date) */}
             <div>
-              <label className="text-sm text-gray-600">Start date</label>
-              <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+              <h4 className="font-medium mb-1">Escludi date</h4>
+              <div className="grid grid-cols-7 gap-2 max-h-40 overflow-auto">
+                {listDatesBetween(dateStart, dateEnd).map((d) => {
+                  const isEx = excluded.includes(d);
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => toggleExclude(d)}
+                      className={`rounded-lg border px-2 py-1 text-sm ${isEx ? "bg-red-50 border-red-300 text-red-700" : "bg-white border-gray-300 text-gray-700"}`}
+                    >
+                      {d.slice(5)}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
+
             <div>
-              <label className="text-sm text-gray-600">End date</label>
-              <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+              <label className="text-sm text-gray-600">Orari (uno per riga)</label>
+              <textarea
+                rows={3}
+                value={timesText}
+                onChange={(e) => setTimesText(e.target.value)}
+                className={`w-full mt-1 rounded-xl border px-3 py-2 ${timesInfo.invalid.length ? "border-red-400" : ""}`}
+                placeholder={"10:00\n10:30\n11:00"}
+              />
+              {timesInfo.invalid.length > 0 && (
+                <p className="text-xs text-red-600 mt-1">Orari non validi: {timesInfo.invalid.join(", ")}. Correggi per procedere.</p>
+              )}
+              {timesInfo.duplicatesRemoved > 0 && (
+                <p className="text-xs text-gray-500 mt-1">Duplicati rimossi automaticamente: {timesInfo.duplicatesRemoved}</p>
+              )}
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-600">Nome base posti</label>
+              <input value={productTitleBase} onChange={(e) => setProductTitleBase(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
             </div>
 
             <div>
@@ -254,169 +270,297 @@ export default function AdminGeneratePage() {
               />
             </div>
 
-            <div>
-              <label className="text-sm text-gray-600">Template suffix</label>
-              <input value={templateSuffix} onChange={(e) => setTemplateSuffix(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="text-sm text-gray-600">Tag (separate da virgola)</label>
-              <input value={tags} onChange={(e) => setTags(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="text-sm text-gray-600">Descrizione</label>
-              <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+            <div className="flex items-center justify-between">
+              <button disabled={!canRun} className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50">
+                Crea posti
+              </button>
+              <span className="text-xs text-gray-600">Stima posti: {comboCount || 0}</span>
             </div>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-4 mt-4">
+          {/* Colonna DX */}
+          <div className="bg-white rounded-2xl shadow-sm border p-5 space-y-4">
+            <h3 className="font-medium">🎟️ Biglietti (visibili)</h3>
             <div>
-              <label className="text-sm text-gray-600">Weekday slots (uno per riga)</label>
-              <textarea
-                rows={3}
-                value={weekdaySlots}
-                onChange={(e) => setWeekdaySlots(e.target.value)}
-                className="w-full mt-1 rounded-xl border px-3 py-2"
-              />
+              <label className="text-sm text-gray-600">Nome base biglietti</label>
+              <input value={bundleTitleBase} onChange={(e) => setBundleTitleBase(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
             </div>
-            <div>
-              <label className="text-sm text-gray-600">Weekend slots (uno per riga)</label>
-              <textarea
-                rows={3}
-                value={weekendSlots}
-                onChange={(e) => setWeekendSlots(e.target.value)}
-                className="w-full mt-1 rounded-xl border px-3 py-2"
-              />
-            </div>
-          </div>
 
-          <div className="mt-3">
-            <label className="inline-flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={fridayAsWeekend} onChange={(e) => setFridayAsWeekend(e.target.checked)} />
-              Venerdì usa prezzi weekend
-            </label>
-          </div>
-
-          <div className="mt-4">
-            <label className="text-sm text-gray-600">Prezzi (JSON)</label>
-            <textarea
-              rows={6}
-              value={pricesJSON}
-              onChange={(e) => setPricesJSON(e.target.value)}
-              className="w-full mt-1 rounded-xl border px-3 py-2 font-mono text-sm"
-              placeholder={pretty(defaultPrices)}
+            {/* Festivi */}
+            <SectionPrices
+              title="Festivi"
+              unico={holidayUnico}
+              setUnico={setHolidayUnico}
+              unicoPrice={holidayUnicoPrice}
+              setUnicoPrice={setHolidayUnicoPrice}
+              triple={holidayTriple}
+              setTriple={setHolidayTriple}
             />
-            <p className="text-xs text-gray-500 mt-1">
-              Struttura attesa: <code>feriali</code>, <code>friday</code>, <code>saturday</code>, <code>sunday</code>, <code>holiday</code>. Valute in €.
-            </p>
-          </div>
 
-          <div className="mt-4">
-            <label className="text-sm text-gray-600">Eccezioni per data (JSON) — opzionale</label>
-            <textarea
-              rows={3}
-              value={exceptionsByDateJSON}
-              onChange={(e) => setExceptionsByDateJSON(e.target.value)}
-              className="w-full mt-1 rounded-xl border px-3 py-2 font-mono text-sm"
-              placeholder={`{\n  "2025-12-08": { "adulto": 16, "bambino": 10, "handicap": 16 }\n}`}
+            {/* Sabato */}
+            <SectionPrices
+              title="Sabato"
+              unico={satUnico}
+              setUnico={setSatUnico}
+              unicoPrice={satUnicoPrice}
+              setUnicoPrice={setSatUnicoPrice}
+              triple={satTriple}
+              setTriple={setSatTriple}
             />
-          </div>
-        </div>
 
-        {/* Azioni */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={onPreview}
-            disabled={pending}
-            className="rounded-xl bg-gray-900 text-white px-4 py-2 disabled:opacity-50"
-          >
-            {pending ? "…" : "Preview (dryRun)"}
-          </button>
-          <button
-            onClick={onCreate}
-            disabled={pending}
-            className="rounded-xl bg-green-600 text-white px-4 py-2 disabled:opacity-50"
-          >
-            {pending ? "…" : "Crea (esegui davvero)"}
-          </button>
-        </div>
+            {/* Domenica */}
+            <SectionPrices
+              title="Domenica"
+              unico={sunUnico}
+              setUnico={setSunUnico}
+              unicoPrice={sunUnicoPrice}
+              setUnicoPrice={setSunUnicoPrice}
+              triple={sunTriple}
+              setTriple={setSunTriple}
+            />
 
-        {/* Output */}
-        {(summary || warnings.length || error || preview.length) ? (
-          <section className="grid lg:grid-cols-3 gap-6">
-            {/* Summary */}
-            <div className="bg-white rounded-2xl shadow-sm border p-4">
-              <h3 className="font-medium mb-2">Summary</h3>
-              {summary ? (
-                <ul className="text-sm space-y-1">
-                  {Object.entries(summary).map(([k, v]) => (
-                    <li key={k}>
-                      <b>{k}</b>: {v}
-                    </li>
-                  ))}
-                </ul>
+            {/* Venerdì */}
+            <section className="border rounded-2xl p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium">Venerdì</h4>
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={fridayAsWeekend} onChange={(e) => setFridayAsWeekend(e.target.checked)} />
+                  Usa prezzi weekend (come Sabato)
+                </label>
+              </div>
+              {!fridayAsWeekend && (
+                <SectionPricesInner
+                  unico={friUnico}
+                  setUnico={setFriUnico}
+                  unicoPrice={friUnicoPrice}
+                  setUnicoPrice={setFriUnicoPrice}
+                  triple={friTriple}
+                  setTriple={setFriTriple}
+                />
+              )}
+            </section>
+
+            {/* Feriali (Lun–Gio) */}
+            <section className="border rounded-2xl p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium">Feriali (Lun–Gio)</h4>
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={ferSeparate} onChange={(e) => setFerSeparate(e.target.checked)} />
+                  Prezzi separati per giorno
+                </label>
+              </div>
+              {!ferSeparate ? (
+                <SectionPricesInner
+                  unico={ferUnico}
+                  setUnico={setFerUnico}
+                  unicoPrice={ferUnicoPrice}
+                  setUnicoPrice={setFerUnicoPrice}
+                  triple={ferTriple}
+                  setTriple={setFerTriple}
+                />
               ) : (
-                <p className="text-sm text-gray-500">Nessun risultato.</p>
-              )}
-
-              {warnings.length > 0 && (
-                <>
-                  <h4 className="font-medium mt-4 mb-1">Warnings</h4>
-                  <ul className="text-xs list-disc pl-4 space-y-1">
-                    {warnings.map((w, i) => <li key={i}>{w}</li>)}
-                  </ul>
-                </>
-              )}
-
-              {error && (
-                <>
-                  <h4 className="font-medium mt-4 mb-1 text-red-600">Errore</h4>
-                  <pre className="text-xs bg-red-50 border border-red-200 rounded-lg p-2 whitespace-pre-wrap break-all">
-                    {error}
-                  </pre>
-                </>
-              )}
-            </div>
-
-            {/* Preview */}
-            <div className="bg-white rounded-2xl shadow-sm border p-4 lg:col-span-2">
-              <h3 className="font-medium mb-2">Preview (prime righe)</h3>
-              {preview.length === 0 ? (
-                <p className="text-sm text-gray-500">Vuoto.</p>
-              ) : (
-                <div className="overflow-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left border-b">
-                        <th className="py-2 px-2">Date</th>
-                        <th className="py-2 px-2">Time</th>
-                        <th className="py-2 px-2">DayType</th>
-                        <th className="py-2 px-2">Seat Product</th>
-                        <th className="py-2 px-2">Bundle Product</th>
-                        <th className="py-2 px-2">Adulto</th>
-                        <th className="py-2 px-2">Bambino</th>
-                        <th className="py-2 px-2">Handicap</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {preview.slice(0, 100).map(renderPreviewRow)}
-                    </tbody>
-                  </table>
+                <div className="grid md:grid-cols-2 gap-3">
+                  <DayCard title="Lunedì">
+                    <SectionPricesInner unico={ferMonUnico} setUnico={setFerMonUnico} unicoPrice={ferMonUnicoPrice} setUnicoPrice={setFerMonUnicoPrice} triple={ferMonTriple} setTriple={setFerMonTriple} />
+                  </DayCard>
+                  <DayCard title="Martedì">
+                    <SectionPricesInner unico={ferTueUnico} setUnico={setFerTueUnico} unicoPrice={ferTueUnicoPrice} setUnicoPrice={setFerTueUnicoPrice} triple={ferTueTriple} setTriple={setFerTueTriple} />
+                  </DayCard>
+                  <DayCard title="Mercoledì">
+                    <SectionPricesInner unico={ferWedUnico} setUnico={setFerWedUnico} unicoPrice={ferWedUnicoPrice} setUnicoPrice={setFerWedUnicoPrice} triple={ferWedTriple} setTriple={setFerWedTriple} />
+                  </DayCard>
+                  <DayCard title="Giovedì">
+                    <SectionPricesInner unico={ferThuUnico} setUnico={setFerThuUnico} unicoPrice={ferThuUnicoPrice} setUnicoPrice={setFerThuUnicoPrice} triple={ferThuTriple} setTriple={setFerThuTriple} />
+                  </DayCard>
                 </div>
               )}
-            </div>
-          </section>
-        ) : null}
+            </section>
 
-        {/* Ultimo payload inviato (comodo per debug) */}
-        <div className="bg-white rounded-2xl shadow-sm border p-4">
-          <h3 className="font-medium mb-2">Ultimo payload inviato</h3>
-          <pre className="text-xs bg-gray-50 border rounded-lg p-3 whitespace-pre-wrap break-all">
-            {lastPayload || "(vuoto)"}
-          </pre>
-        </div>
+            {/* Metadati prodotto */}
+            <section className="border rounded-2xl p-4 space-y-2">
+              <h4 className="font-medium">Dettagli prodotto</h4>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm text-gray-600">Template suffix</label>
+                  <input
+                    value={templateSuffix}
+                    onChange={(e) => setTemplateSuffix(e.target.value)}
+                    className="w-full mt-1 rounded-xl border px-3 py-2"
+                    placeholder="es. bundle"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm text-gray-600">Immagine (URL)</label>
+                  <input
+                    value={imageUrl}
+                    onChange={(e) => setImageUrl(e.target.value)}
+                    className="w-full mt-1 rounded-xl border px-3 py-2"
+                    placeholder="https://…"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-sm text-gray-600">Descrizione</label>
+                  <textarea
+                    rows={4}
+                    value={desc}
+                    onChange={(e) => setDesc(e.target.value)}
+                    className="w-full mt-1 rounded-xl border px-3 py-2"
+                    placeholder="Testo descrizione…"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-sm text-gray-600">Tag (separati da virgola)</label>
+                  <input value={tags} onChange={(e) => setTags(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" />
+                </div>
+              </div>
+            </section>
+
+            <div className="flex items-center justify-between">
+              <button disabled={!canRun} className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50">
+                Crea biglietti
+              </button>
+              <span className="text-xs text-gray-600">Stima biglietti: {comboCount || 0}</span>
+            </div>
+          </div>
+        </section>
+
+        {/* Output sintetico */}
+        <section className="grid lg:grid-cols-2 gap-6">
+          <div className="bg-white rounded-2xl shadow-sm border p-5">
+            <h3 className="font-medium mb-2">Stima risultati</h3>
+            <p className="text-sm">
+              Posti: <b>{comboCount || 0}</b> • Biglietti: <b>{comboCount || 0}</b>
+            </p>
+            {timesInfo.valid.length > 0 && (
+              <p className="text-xs text-gray-600 mt-1">Orari validi (ordinati): {timesInfo.valid.join(", ")}</p>
+            )}
+          </div>
+          <div className="bg-white rounded-2xl shadow-sm border p-5">
+            <h3 className="font-medium mb-2">Anteprima carrello</h3>
+            <p className="text-sm">
+              <b>Prodotto:</b>{" "}
+              {bundleTitleBase && sampleDate && sampleTime
+                ? `${bundleTitleBase} — ${sampleDate.split("-").reverse().join("/")} ${sampleTime}`
+                : "(compila titolo, date e orari)"}
+            </p>
+            <p className="text-sm">
+              <b>Variante:</b> {sampleVariant}
+            </p>
+          </div>
+        </section>
       </div>
+    </div>
+  );
+}
+
+// ---- Sotto-componenti ----
+function SectionPrices({
+  title,
+  unico,
+  setUnico,
+  unicoPrice,
+  setUnicoPrice,
+  triple,
+  setTriple,
+}: {
+  title: string;
+  unico: boolean;
+  setUnico: (v: boolean) => void;
+  unicoPrice: number;
+  setUnicoPrice: (v: number) => void;
+  triple: { adulto?: number; bambino?: number; handicap?: number };
+  setTriple: (t: { adulto?: number; bambino?: number; handicap?: number }) => void;
+}) {
+  return (
+    <section className="border rounded-2xl p-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <h4 className="font-medium">{title}</h4>
+        <label className="inline-flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={unico} onChange={(e) => setUnico(e.target.checked)} />
+          Biglietto unico
+        </label>
+      </div>
+      {unico ? (
+        <input
+          type="number"
+          step="0.01"
+          value={unicoPrice}
+          onChange={(e) => setUnicoPrice(parseFloat(e.target.value || "0"))}
+          className="w-full rounded-xl border px-3 py-2"
+          placeholder="€"
+        />
+      ) : (
+        <div className="grid grid-cols-3 gap-2">
+          <Num label="Adulto (€)" value={triple.adulto} onChange={(v) => setTriple({ ...triple, adulto: v })} />
+          <Num label="Bambino (€)" value={triple.bambino} onChange={(v) => setTriple({ ...triple, bambino: v })} />
+          <Num label="Handicap (€)" value={triple.handicap} onChange={(v) => setTriple({ ...triple, handicap: v })} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SectionPricesInner({
+  unico,
+  setUnico,
+  unicoPrice,
+  setUnicoPrice,
+  triple,
+  setTriple,
+}: {
+  unico: boolean;
+  setUnico: (v: boolean) => void;
+  unicoPrice: number;
+  setUnicoPrice: (v: number) => void;
+  triple: { adulto?: number; bambino?: number; handicap?: number };
+  setTriple: (t: { adulto?: number; bambino?: number; handicap?: number }) => void;
+}) {
+  return (
+    <>
+      <label className="inline-flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={unico} onChange={(e) => setUnico(e.target.checked)} />
+        Biglietto unico
+      </label>
+      {unico ? (
+        <input
+          type="number"
+          step="0.01"
+          value={unicoPrice}
+          onChange={(e) => setUnicoPrice(parseFloat(e.target.value || "0"))}
+          className="w-full rounded-xl border px-3 py-2"
+          placeholder="€"
+        />
+      ) : (
+        <div className="grid grid-cols-3 gap-2">
+          <Num label="Adulto (€)" value={triple.adulto} onChange={(v) => setTriple({ ...triple, adulto: v })} />
+          <Num label="Bambino (€)" value={triple.bambino} onChange={(v) => setTriple({ ...triple, bambino: v })} />
+          <Num label="Handicap (€)" value={triple.handicap} onChange={(v) => setTriple({ ...triple, handicap: v })} />
+        </div>
+      )}
+    </>
+  );
+}
+
+function DayCard({ title, children }: { title: string; children: any }) {
+  return (
+    <div className="rounded-xl border p-3">
+      <div className="text-sm font-medium mb-1">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function Num({ label, value, onChange }: { label: string; value?: number; onChange: (v: number) => void }) {
+  return (
+    <div>
+      <label className="text-sm text-gray-600">{label}</label>
+      <input
+        type="number"
+        step="0.01"
+        value={value ?? 0}
+        onChange={(e) => onChange(parseFloat(e.target.value || "0"))}
+        className="w-full rounded-xl border px-3 py-2"
+      />
     </div>
   );
 }
