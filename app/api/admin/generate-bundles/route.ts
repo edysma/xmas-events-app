@@ -1,6 +1,5 @@
 // app/api/admin/generate-bundles/route.ts
 import { adminFetchGQL, getShopPublicHolidays, publishProductToPublication } from "@/lib/shopify-admin";
-import { adminFetchGQL, getShopPublicHolidays } from "@/lib/shopify-admin";
 import {
   ensureSeatUnit,
   ensureBundle,
