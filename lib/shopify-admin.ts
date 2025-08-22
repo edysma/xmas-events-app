@@ -13,6 +13,11 @@ const SHOP_DOMAIN =
   process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOP_DOMAIN || "";
 const ADMIN_ACCESS_TOKEN = requiredEnv("ADMIN_ACCESS_TOKEN");
 
+// Se vuoi rendere opzionale la pubblicazione, NON usare requiredEnv qui.
+// Lo rendiamo facoltativo, ma la publish() fallirà con errore parlante se manca.
+const ONLINE_STORE_PUBLICATION_ID =
+  process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || "";
+
 if (!SHOP_DOMAIN) {
   throw new Error(
     "Missing env: SHOPIFY_STORE_DOMAIN (o SHOP_DOMAIN in fallback)"
@@ -210,7 +215,7 @@ export async function uploadFileFromUrl(
   const alt = opts?.alt ?? null;
 
   const m = /* GraphQL */ `
-    mutation FileCreate($files: [FileCreateInput!]!) {
+    mutation FileCreate($files: [FileCreateInput!]!] {
       fileCreate(files: $files) {
         files {
           id
@@ -250,6 +255,66 @@ export async function uploadFileFromUrl(
   const id = data.fileCreate?.files?.[0]?.id;
   if (!id) throw new Error("fileCreate: nessun file creato");
   return id;
+}
+
+// -------------------- Publish helpers (Online Store) --------------------
+/**
+ * Pubblica un Product su una Publication (Online Store).
+ * NOTA: usa publishablePublish con frammento inline su Product.
+ */
+export async function publishProductToPublication(opts: {
+  productId: string;           // gid://shopify/Product/...
+  publicationId?: string;      // se omesso usa SHOPIFY_ONLINE_STORE_PUBLICATION_ID
+}): Promise<{ ok: true }> {
+  const publicationId = opts.publicationId || ONLINE_STORE_PUBLICATION_ID;
+  if (!publicationId) {
+    throw new Error(
+      "Missing env SHOPIFY_ONLINE_STORE_PUBLICATION_ID: impossibile pubblicare il prodotto"
+    );
+  }
+
+  const M = /* GraphQL */ `
+    mutation PublishProduct($id: ID!, $pubId: ID!) {
+      publishablePublish(id: $id, input: { publicationId: $pubId }) {
+        publishable {
+          __typename
+          ... on Product { id }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const data = await adminFetchGQL<{
+    publishablePublish: {
+      publishable?: { __typename: string } | null;
+      userErrors?: { field?: string[]; message: string }[];
+    };
+  }>(M, { id: opts.productId, pubId: publicationId });
+
+  const errs = data.publishablePublish?.userErrors ?? [];
+  if (errs.length) {
+    const msg = errs.map((e) => e.message).join(" | ");
+    throw new Error(`publishablePublish error: ${msg}`);
+  }
+
+  // Facoltativo: potremmo verificare __typename === "Product"
+  return { ok: true };
+}
+
+/**
+ * Comodità: pubblica N productIds in sequenza (banale, senza throttling fine).
+ */
+export async function publishProductsBatch(
+  productIds: string[],
+  publicationId?: string
+): Promise<{ ok: true; published: number }> {
+  let published = 0;
+  for (const pid of productIds) {
+    await publishProductToPublication({ productId: pid, publicationId });
+    published++;
+  }
+  return { ok: true, published };
 }
 
 // -------------------- Compat vecchio nome --------------------
