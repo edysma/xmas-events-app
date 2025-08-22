@@ -46,11 +46,11 @@ export default function AdminGeneratePage() {
 
   // Prices JSON (per semplicità e aderenza all’API)
   const defaultPrices = {
-    "feriali": { "adulto": 12, "bambino": 8, "handicap": 12 },
-    "friday": { "adulto": 12, "bambino": 8, "handicap": 12 },
-    "saturday": { "adulto": 14, "bambino": 9, "handicap": 14 },
-    "sunday": { "adulto": 14, "bambino": 9, "handicap": 14 },
-    "holiday": { "adulto": 16, "bambino": 10, "handicap": 16 }
+    feriali: { adulto: 12, bambino: 8, handicap: 12 },
+    friday: { adulto: 12, bambino: 8, handicap: 12 },
+    saturday: { adulto: 14, bambino: 9, handicap: 14 },
+    sunday: { adulto: 14, bambino: 9, handicap: 14 },
+    holiday: { adulto: 16, bambino: 10, handicap: 16 },
   };
   const [pricesJSON, setPricesJSON] = useState<string>(pretty(defaultPrices));
 
@@ -76,17 +76,26 @@ export default function AdminGeneratePage() {
   const [error, setError] = useState<string>("");
 
   // ---------- Persist piccoli comfort ----------
+  // carica da localStorage (solo client)
   useEffect(() => {
-    const s = localStorage.getItem(LS_SECRET);
-    if (s) setAdminSecret(s);
-    const last = localStorage.getItem(LS_LAST_BODY);
-    if (last) {
-      // Non ripristino automaticamente tutti i campi, è solo comodità:
-      // lo mostro nel box “Ultimo payload” in basso.
+    if (typeof window === "undefined") return;
+    try {
+      const s = window.localStorage.getItem(LS_SECRET);
+      if (s) setAdminSecret(s);
+      // LS_LAST_BODY lo mostriamo sotto, lo leggeremo in un altro effect
+    } catch {
+      // ignora
     }
   }, []);
+
+  // salva secret su localStorage (solo client)
   useEffect(() => {
-    localStorage.setItem(LS_SECRET, adminSecret ?? "");
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(LS_SECRET, adminSecret ?? "");
+    } catch {
+      // ignora
+    }
   }, [adminSecret]);
 
   // ---------- Helpers ----------
@@ -151,7 +160,15 @@ export default function AdminGeneratePage() {
     setError("");
 
     const body = buildBody();
-    localStorage.setItem(LS_LAST_BODY, pretty(body));
+
+    // salva ultimo payload (solo client)
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(LS_LAST_BODY, pretty(body));
+      } catch {
+        // ignora
+      }
+    }
 
     try {
       const res = await fetch(API_PATH, {
@@ -198,6 +215,18 @@ export default function AdminGeneratePage() {
     }
   }
 
+  // ---------- Ultimo payload (mostra solo su client) ----------
+  const [lastPayload, setLastPayload] = useState<string>("");
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const v = window.localStorage.getItem(LS_LAST_BODY) || "";
+      setLastPayload(v);
+    } catch {
+      setLastPayload("");
+    }
+  }, [summary, preview, warnings, error]); // aggiorno quando arrivano risultati
+
   // Render helpers per preview generico (supporta sia preview “feed” che “manuale”)
   function renderPreviewRow(item: any, idx: number) {
     // Due formati supportati:
@@ -224,10 +253,6 @@ export default function AdminGeneratePage() {
       </tr>
     );
   }
-
-  const lastPayload = useMemo(() => {
-    return localStorage.getItem(LS_LAST_BODY) || "";
-  }, [summary, preview, warnings, error]); // aggiorno quando arrivano risultati
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -475,7 +500,7 @@ export default function AdminGeneratePage() {
         <div className="bg-white rounded-2xl shadow-sm border p-4">
           <h3 className="font-medium mb-2">Ultimo payload inviato</h3>
           <pre className="text-xs bg-gray-50 border rounded-lg p-3 whitespace-pre-wrap break-all">
-{lastPayload || "(vuoto)"}
+            {lastPayload || "(vuoto)"}
           </pre>
         </div>
       </div>
