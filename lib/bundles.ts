@@ -2,7 +2,12 @@
 // Helpers per creare/riusare Posti (Seat Unit) e Biglietti (Bundle) e collegare componenti.
 // Allineato a Admin GraphQL 2024-07/2024-10
 
-import { adminFetchGQL, getDefaultLocationId, publishProductToPublication } from "@/lib/shopify-admin";
+import {
+  adminFetchGQL,
+  getDefaultLocationId,
+  publishProductToPublication,
+  uploadFileFromUrl,
+} from "@/lib/shopify-admin";
 
 // --- Tipi locali ---
 export type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
@@ -156,6 +161,28 @@ const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
   }
 `;
 
+/* ---------- MEDIA: attach featured image ---------- */
+
+// Crea media (collega un'immagine al prodotto)
+const M_PRODUCT_CREATE_MEDIA = /* GraphQL */ `
+  mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+    productCreateMedia(productId: $productId, media: $media) {
+      media { ... on MediaImage { id image { url } } }
+      mediaUserErrors { field message }
+    }
+  }
+`;
+
+// Imposta media in evidenza (featured)
+const M_PRODUCT_SET_FEATURED = /* GraphQL */ `
+  mutation ProductSetFeatured($productId: ID!, $mediaId: ID!) {
+    productSetFeaturedMedia(productId: $productId, mediaId: $mediaId) {
+      product { id featuredMedia { id } }
+      userErrors { field message }
+    }
+  }
+`;
+
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
@@ -183,14 +210,13 @@ function getOnlineStorePublicationIdOrThrow(): string {
 }
 
 async function publishProductToOnlineStore(productId: string, _pubId?: string) {
-  // Passa i parametri nel formato oggetto richiesto dall'helper
+  // Passa i parametri nel formato oggetto richiesto dall'helper centralizzato
   if (_pubId) {
     await publishProductToPublication({ productId, publicationId: _pubId });
   } else {
     await publishProductToPublication({ productId });
   }
 }
-
 
 async function createProductActive(opts: {
   title: string;
@@ -210,6 +236,7 @@ async function createProductActive(opts: {
         templateSuffix: opts.templateSuffix || undefined,
         tags: opts.tags || undefined,
         descriptionHtml: opts.descriptionHtml || undefined,
+        // Shopify potrebbe ignorare immagini esterne qui; faremo attach esplicito dopo
         images: opts.imageUrl ? [{ src: opts.imageUrl }] : undefined,
       },
     }
@@ -253,6 +280,41 @@ function mapVariantIdsFromNodes(nodes: any[]): Record<"unico" | "adulto" | "bamb
     else if (t.includes("handicap")) ret.handicap = v.id;
   }
   return ret;
+}
+
+/* ------ helper: attach featured image al prodotto ------ */
+async function attachFeaturedImage(productId: string, imageUrl: string) {
+  // 1) Assicura il file in Files (alcuni negozi richiedono che l'URL sia “trusted”)
+  try {
+    await uploadFileFromUrl(imageUrl, { contentType: "IMAGE" });
+  } catch {
+    // Se è già presente o l’URL è pubblico su CDN, proseguiamo comunque
+  }
+
+  // 2) Collega l'immagine al prodotto come MediaImage
+  const createRes = await adminFetchGQL<{
+    productCreateMedia: {
+      media?: { id: string }[];
+      mediaUserErrors?: { field?: string[]; message: string }[];
+    };
+  }>(M_PRODUCT_CREATE_MEDIA, {
+    productId,
+    media: [{ mediaContentType: "IMAGE", originalSource: imageUrl }],
+  });
+
+  const mErrs = createRes?.productCreateMedia?.mediaUserErrors || [];
+  if (mErrs.length) throw new Error(`productCreateMedia error: ${mErrs.map(e => e.message).join(" | ")}`);
+
+  const mediaId = createRes?.productCreateMedia?.media?.[0]?.id;
+  if (!mediaId) throw new Error("productCreateMedia: nessun media creato/collegato");
+
+  // 3) Imposta come featured
+  const featRes = await adminFetchGQL<{ productSetFeaturedMedia: { userErrors?: { message: string }[] } }>(
+    M_PRODUCT_SET_FEATURED,
+    { productId, mediaId }
+  );
+  const fErrs = (featRes as any)?.productSetFeaturedMedia?.userErrors || [];
+  if (fErrs.length) throw new Error(`productSetFeaturedMedia error: ${fErrs.map(e => e.message).join(" | ")}`);
 }
 
 // --- API pubbliche ---
@@ -420,13 +482,24 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     return { productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN", variantMap: ret, createdProduct: false, createdVariants: 0 };
   }
 
-  // 3) crea prodotto (draft -> ACTIVE + publish)
+  // 3) crea prodotto (ACTIVE + publish)
   const product = await createProductActive({
     title,
     templateSuffix: input.templateSuffix,
     tags: Array.from(new Set([...(input.tags || []), "Bundle", input.eventHandle].filter(Boolean))),
     descriptionHtml: input.description || undefined,
+    imageUrl: undefined, // l'attach lo facciamo in modo affidabile dopo
   });
+
+  // 3.b) Attacca immagine come featured se fornita
+  if (input.image) {
+    try {
+      await attachFeaturedImage(product.id, input.image);
+    } catch (err) {
+      // Non bloccare la creazione del bundle per l'immagine
+      console.warn("attachFeaturedImage warning:", err);
+    }
+  }
 
   // 4) crea varianti richieste
   const needed = variantNamesForMode(input.mode);
