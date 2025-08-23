@@ -181,6 +181,36 @@ const M_PRODUCT_SET_FEATURED = /* GraphQL */ `
   }
 `;
 
+/* ---------- TRACKING SCORTE (Seat: ON, Bundle: OFF) ---------- */
+const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
+  mutation TrackUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      userErrors { field message }
+    }
+  }
+`;
+
+async function setVariantTracking(params: {
+  productId: string;
+  variantIds: string[];
+  tracks: boolean;
+  policy?: "DENY" | "CONTINUE";
+}) {
+  const { productId, variantIds, tracks } = params;
+  const policy = params.policy ?? (tracks ? "DENY" : "CONTINUE");
+  if (!variantIds.length) return;
+
+  const variants = variantIds.map((id) => ({
+    id,
+    tracksInventory: tracks,
+    inventoryPolicy: policy,
+  }));
+
+  const r = await adminFetchGQL(M_PV_BULK_UPDATE_TRACK, { productId, variants });
+  const errs = (r as any)?.productVariantsBulkUpdate?.userErrors ?? [];
+  if (errs.length) throw new Error(`productVariantsBulkUpdate(track) error: ${errs.map((e: any) => e.message).join(" | ")}`);
+}
+
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
@@ -337,6 +367,10 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
   if (existing) {
     const variantId = existing.variants?.edges?.[0]?.node?.id;
     if (!variantId) throw new Error("Seat esistente ma senza variante");
+
+    // 🔒 traccia scorte sulla Seat Unit (DENY)
+    await setVariantTracking({ productId: existing.id, variantIds: [variantId], tracks: true, policy: "DENY" });
+
     return { productId: existing.id, variantId, created: false };
   }
 
@@ -358,6 +392,10 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
   const prodFull = await getProductById(product.id);
   const variantId = prodFull?.variants?.edges?.[0]?.node?.id;
   if (!variantId) throw new Error("Seat creato ma senza variante (post read-by-id)");
+
+  // 🔒 traccia scorte sulla Seat Unit (DENY)
+  await setVariantTracking({ productId: product.id, variantIds: [variantId], tracks: true, policy: "DENY" });
+
   return { productId: product.id, variantId, created: true };
 }
 
@@ -441,27 +479,41 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
 
       const created = out.productVariantsBulkCreate.productVariants || [];
       const createdMap = mapVariantIdsFromNodes(created);
+
+      const variantMap = {
+        unico: current["unico"] ?? createdMap.unico,
+        adulto: current["adulto"] ?? createdMap.adulto,
+        bambino: current["bambino"] ?? createdMap.bambino,
+        handicap: current["handicap"] ?? createdMap.handicap,
+      };
+
+      // 📴 bundle: non tracciare scorte
+      const bundleVariantIds = Object.values(variantMap).filter(Boolean) as string[];
+      await setVariantTracking({ productId: existing.id, variantIds: bundleVariantIds, tracks: false, policy: "CONTINUE" });
+
       return {
         productId: existing.id,
-        variantMap: {
-          unico: current["unico"] ?? createdMap.unico,
-          adulto: current["adulto"] ?? createdMap.adulto,
-          bambino: current["bambino"] ?? createdMap.bambino,
-          handicap: current["handicap"] ?? createdMap.handicap,
-        },
+        variantMap,
         createdProduct: false,
         createdVariants: created.length,
       };
     }
 
+    // nessuna nuova variante: assicurati che il tracking sia OFF
+    const variantMapNoNew = {
+      unico: current["unico"],
+      adulto: current["adulto"],
+      bambino: current["bambino"],
+      handicap: current["handicap"],
+    };
+    const bundleVariantIds = Object.values(variantMapNoNew).filter(Boolean) as string[];
+    if (!input.dryRun && bundleVariantIds.length) {
+      await setVariantTracking({ productId: existing.id, variantIds: bundleVariantIds, tracks: false, policy: "CONTINUE" });
+    }
+
     return {
       productId: existing.id,
-      variantMap: {
-        unico: current["unico"],
-        adulto: current["adulto"],
-        bambino: current["bambino"],
-        handicap: current["handicap"],
-      },
+      variantMap: variantMapNoNew,
       createdProduct: false,
       createdVariants: 0,
     };
@@ -510,11 +562,25 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
   const created = out.productVariantsBulkCreate.productVariants || [];
   const ret = mapVariantIdsFromNodes(created);
 
+  // Se per qualsiasi motivo non arrivano le varianti, fallback: leggi per ID
   if (!ret.unico && !ret.adulto && !ret.bambino && !ret.handicap) {
     const full = await getProductById(product.id);
     const edges = full?.variants?.edges?.map((e: any) => e.node) || [];
     const mapped = mapVariantIdsFromNodes(edges);
+
+    // 📴 bundle: non tracciare scorte
+    const bundleVariantIds = Object.values(mapped).filter(Boolean) as string[];
+    if (bundleVariantIds.length) {
+      await setVariantTracking({ productId: product.id, variantIds: bundleVariantIds, tracks: false, policy: "CONTINUE" });
+    }
+
     return { productId: product.id, variantMap: mapped, createdProduct: true, createdVariants: needed.length };
+  }
+
+  // 📴 bundle: non tracciare scorte
+  const bundleVariantIds = Object.values(ret).filter(Boolean) as string[];
+  if (bundleVariantIds.length) {
+    await setVariantTracking({ productId: product.id, variantIds: bundleVariantIds, tracks: false, policy: "CONTINUE" });
   }
 
   return { productId: product.id, variantMap: ret, createdProduct: true, createdVariants: created.length };
