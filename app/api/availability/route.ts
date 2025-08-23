@@ -9,7 +9,7 @@ import { adminFetchGQL } from "@/lib/shopify-admin";
 function withCORS(res: NextResponse) {
   res.headers.set("Access-Control-Allow-Origin", "*");
   res.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.headers.set("Access-Control-Allow-Headers", "Content-Type");
+  res.headers.set("Access-Control-Allow-Headers", "Content-Type, X-Requested-With");
   res.headers.append("Vary", "Origin");
   return res;
 }
@@ -118,6 +118,7 @@ export async function GET(req: NextRequest) {
     let tracked = true;
 
     if (locationIdRaw) {
+      // Caso con location specifica
       const locationGid = toGid("Location", locationIdRaw);
       const data = await adminFetchGQL<{
         productVariant: {
@@ -131,11 +132,49 @@ export async function GET(req: NextRequest) {
         } | null;
       }>(QUERY_AVAIL_AT_LOCATION, { variantId: seatUnitGid, locationId: locationGid });
 
+      const trackedLocal = data?.productVariant?.inventoryItem?.tracked ?? true;
       const lvl = data?.productVariant?.inventoryItem?.inventoryLevel;
-      tracked = data?.productVariant?.inventoryItem?.tracked ?? true;
       const qty = lvl?.quantities?.find(q => q.name === "available")?.quantity ?? 0;
-      perLocation = lvl ? [{ locationId: lvl.location.id, locationName: lvl.location.name, available: qty }] : [];
-      total = qty;
+
+      if (lvl) {
+        // Trovato livello sulla location specificata
+        tracked = trackedLocal;
+        perLocation = [{ locationId: lvl.location.id, locationName: lvl.location.name, available: qty }];
+        total = qty;
+
+        return withCORS(
+          NextResponse.json({
+            ok: true,
+            seatUnitVariantId: seatUnitGid,
+            tracked,
+            totalAvailable: total,
+            perLocation,
+            source: "single_location",
+          })
+        );
+      }
+
+      // --- FALLBACK: nessun livello su quella location → somma tutte le location
+      const all = await adminFetchGQL<{
+        productVariant: {
+          inventoryItem: {
+            tracked: boolean;
+            inventoryLevels: {
+              edges: { node: { location: { id: string; name: string }; quantities: { name: string; quantity: number }[] } }[];
+            } | null;
+          } | null;
+        } | null;
+      }>(QUERY_AVAIL_ALL_LOCATIONS, { variantId: seatUnitGid });
+
+      const edges = all?.productVariant?.inventoryItem?.inventoryLevels?.edges || [];
+      tracked = all?.productVariant?.inventoryItem?.tracked ?? trackedLocal;
+
+      perLocation = edges.map(e => ({
+        locationId: e.node.location.id,
+        locationName: e.node.location.name,
+        available: e.node.quantities.find(q => q.name === "available")?.quantity ?? 0,
+      }));
+      total = perLocation.reduce((s, r) => s + r.available, 0);
 
       return withCORS(
         NextResponse.json({
@@ -144,17 +183,18 @@ export async function GET(req: NextRequest) {
           tracked,
           totalAvailable: total,
           perLocation,
-          source: "single_location",
+          source: "fallback_sum_all_locations",
         })
       );
     } else {
+      // Caso senza location specifica → somma tutte
       const data = await adminFetchGQL<{
         productVariant: {
           inventoryItem: {
             tracked: boolean;
             inventoryLevels: {
               edges: { node: { location: { id: string; name: string }; quantities: { name: string; quantity: number }[] } }[];
-            };
+            } | null;
           } | null;
         } | null;
       }>(QUERY_AVAIL_ALL_LOCATIONS, { variantId: seatUnitGid });
