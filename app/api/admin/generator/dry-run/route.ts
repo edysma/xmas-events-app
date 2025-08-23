@@ -1,13 +1,14 @@
-// app/api/admin/generator/dry-run/route.ts
+// app/api/admin/generator/plan/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextRequest, NextResponse } from "next/server";
+import { adminFetchGQL } from "@/lib/shopify-admin";
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 const DEFAULT_LOCATION_ID = process.env.DEFAULT_LOCATION_ID || "";
 
-// --- CORS & Auth ---
+/* -------------------- CORS & AUTH -------------------- */
 function withCORS(res: NextResponse) {
   res.headers.set("Access-Control-Allow-Origin", "*");
   res.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -24,11 +25,12 @@ function isAuthorized(req: NextRequest) {
   return !!ADMIN_SECRET && header === ADMIN_SECRET;
 }
 
-// --- Helpers ---
+/* -------------------- Helpers di validazione -------------------- */
 function isISODate(s: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const d = new Date(s + "T00:00:00Z");
-  return !isNaN(d.getTime()) && s === `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+  return !isNaN(d.getTime()) &&
+    s === `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
 }
 function isTime(s: string) {
   if (!/^\d{2}:\d{2}$/.test(s)) return false;
@@ -43,75 +45,124 @@ function slugify(s: string) {
     .replace(/^-+|-+$/g, "")
     .toLowerCase();
 }
-function hhmmCompact(t: string) {
-  return t.replace(":", "");
-}
+function hhmmCompact(t: string) { return t.replace(":", ""); }
 
-// Tipi di ticket ammessi e seats_per_ticket
-const TICKET_PRESETS: Record<string, Array<{ key: "single"|"adulto"|"bambino"|"handicap"; seats: 1|2 }>> = {
-  single:  [{ key: "single",   seats: 1 }],
-  triple:  [{ key: "adulto",   seats: 1 }, { key: "bambino", seats: 1 }, { key: "handicap", seats: 2 }],
+/* -------------------- Preset ticket -------------------- */
+type TicketKey = "single"|"adulto"|"bambino"|"handicap";
+const TICKET_PRESETS: Record<string, Array<{ key: TicketKey; seats: 1|2 }>> = {
+  single: [{ key: "single", seats: 1 }],
+  triple: [{ key: "adulto", seats: 1 }, { key: "bambino", seats: 1 }, { key: "handicap", seats: 2 }],
 };
 
 type InputSlot =
   | { time: string; tickets?: "single"|"triple" }
-  | { time: string; tickets: Array<{ key: "single"|"adulto"|"bambino"|"handicap"; seats?: 1|2 }> };
+  | { time: string; tickets: Array<{ key: TicketKey; seats?: 1|2 }> };
 
 type Payload = {
-  collection: string;           // handle della collection evento (es. "viaggio-incantato")
-  date: string;                 // "YYYY-MM-DD"
-  capacity: number;             // capienza SeatUnit per slot (es. 50)
-  slots: InputSlot[];           // orari
-  locationId?: string;          // opzionale, default = DEFAULT_LOCATION_ID
-  namePrefix?: string;          // opzionale, prefisso per nomi prodotti (es. "Xmas 2025")
+  collection: string;
+  date: string;
+  capacity: number;
+  slots: InputSlot[];
+  locationId?: string;
+  namePrefix?: string;
 };
 
-// Normalizzazione ticket
 function normalizeTickets(tickets: InputSlot["tickets"]) {
   if (!tickets || tickets === "single") return TICKET_PRESETS.single;
   if (tickets === "triple") return TICKET_PRESETS.triple;
   const arr = Array.isArray(tickets) ? tickets : [];
   const seen = new Set<string>();
-  const out: Array<{ key: "single"|"adulto"|"bambino"|"handicap"; seats: 1|2 }> = [];
+  const out: Array<{ key: TicketKey; seats: 1|2 }> = [];
   for (const t of arr) {
     if (!t?.key) continue;
     if (!["single","adulto","bambino","handicap"].includes(t.key)) continue;
     const seats = (t.key === "handicap") ? 2 : (t.seats === 1 || t.seats === 2 ? t.seats : 1);
     if (seen.has(t.key)) continue;
     seen.add(t.key);
-    out.push({ key: t.key as any, seats: seats as 1|2 });
+    out.push({ key: t.key as TicketKey, seats: seats as 1|2 });
   }
-  if (!out.length) return TICKET_PRESETS.single;
-  return out;
+  return out.length ? out : TICKET_PRESETS.single;
 }
 
+/* -------------------- GQL -------------------- */
+const QUERY_PRODUCT_BY_HANDLE = /* GraphQL */ `
+  query ProductLookup($handle: String!, $title: String!, $tag: String!) {
+    productByHandle(handle: $handle) {
+      id title handle
+      tags
+      variants(first: 100) { nodes { id title sku } }
+    }
+    products(first: 1, query: $title) {
+      edges { node {
+        id title handle tags
+        variants(first: 100) { nodes { id title sku } }
+      } }
+    }
+    # Ricerca alternativa per tag + titolo (migliora affidabilità)
+    productsByTag: products(first: 1, query: $tag) {
+      edges { node {
+        id title handle tags
+        variants(first: 100) { nodes { id title sku } }
+      } }
+    }
+  }
+`;
+
+type VariantNode = { id: string; title: string; sku: string | null };
+type ProductNode = { id: string; title: string; handle: string; tags: string[]; variants: { nodes: VariantNode[] } };
+
+async function fetchProductWithFallback(handle: string, title: string, tag: string) {
+  const data = await adminFetchGQL<{
+    productByHandle: ProductNode | null;
+    products: { edges: { node: ProductNode }[] };
+    productsByTag: { edges: { node: ProductNode }[] };
+  }>(QUERY_PRODUCT_BY_HANDLE, { handle, title: `title:'${title.replace(/'/g,"\\'")}'`, tag: `tag:${tag} AND title:'${title.replace(/'/g,"\\'")}'` });
+
+  const byHandle = data?.productByHandle || null;
+  const byTitle  = data?.products?.edges?.[0]?.node || null;
+  const byTag    = data?.productsByTag?.edges?.[0]?.node || null;
+
+  // Ordine preferenza: handle → tag+title → title
+  const pick = byHandle || byTag || byTitle || null;
+  return pick;
+}
+
+function findVariantId(prod: ProductNode, desiredTitle: string, desiredSKU?: string | null) {
+  const nodes = prod?.variants?.nodes || [];
+  // 1) match per SKU
+  if (desiredSKU) {
+    const v = nodes.find(n => (n.sku||"").trim() === desiredSKU);
+    if (v) return { id: v.id, by: "sku" as const };
+  }
+  // 2) match per titolo (case sensitive come in Shopify)
+  const v2 = nodes.find(n => n.title === desiredTitle);
+  if (v2) return { id: v2.id, by: "title" as const };
+  return null;
+}
+
+/* -------------------- Handler -------------------- */
 export async function POST(req: NextRequest) {
   if (!isAuthorized(req)) {
     return withCORS(NextResponse.json({ ok:false, error:"Unauthorized" }, { status: 401 }));
   }
 
   let body: Partial<Payload> = {};
-  try {
-    body = await req.json();
-  } catch {
-    return withCORS(NextResponse.json({ ok:false, error:"Invalid JSON body" }, { status: 400 }));
-  }
+  try { body = await req.json(); }
+  catch { return withCORS(NextResponse.json({ ok:false, error:"Invalid JSON body" }, { status: 400 })); }
 
-  // --- Validazione minima ---
+  // Validazione minima
   const errors: string[] = [];
-  if (!body.collection) errors.push("Missing 'collection' (collection handle).");
+  if (!body.collection) errors.push("Missing 'collection'.");
   if (!body.date || !isISODate(body.date)) errors.push("Missing or invalid 'date' (YYYY-MM-DD).");
   if (!Number.isFinite(body.capacity!) || (body.capacity as number) <= 0) errors.push("Missing or invalid 'capacity' (>0).");
   if (!Array.isArray(body.slots) || !body.slots.length) errors.push("Missing 'slots' (non-empty array).");
-  const slots = (body.slots || []).map((s, idx) => {
+
+  const normSlots = (body.slots || []).map((s, idx) => {
     const time = (s as any)?.time;
     if (!time || !isTime(time)) {
-      errors.push(`Slot[${idx}] invalid 'time' (expected HH:mm).`);
+      errors.push(`Slot[${idx}] invalid 'time' (HH:mm).`);
     }
-    return {
-      time,
-      tickets: normalizeTickets((s as any)?.tickets),
-    };
+    return { time, tickets: normalizeTickets((s as any)?.tickets) };
   });
 
   if (errors.length) {
@@ -124,27 +175,14 @@ export async function POST(req: NextRequest) {
   const locationId = body.locationId || DEFAULT_LOCATION_ID || null;
   const namePrefix = (body.namePrefix || "").trim();
 
-  // --- Costruzione piano (dry-run, nessuna scrittura) ---
-  // Convenzioni suggerite (personalizzabili nelle prossime iterazioni):
-  // - SeatUnit: 1 variante per ciascuno slot orario dello stesso giorno
-  //   Product title: `${namePrefix || collection} — ${date}`
-  //   Variant title: `${time}`
-  //   SKU variant (suggerito): `SU-${date}-${HHmm}`
-  // - Bundle: 1 prodotto per slot, con fino a 3 varianti (adulto/bambino/handicap) oppure 1 variante "single"
-  //   Product title: `${namePrefix || collection} — ${date} ${time}`
-  //   Variant titles: capitalizzate (Adulto/Bambino/Handicap) o "Biglietto unico"
-  //   Metafield variante:
-  //     - sinflora.seat_unit = riferimento alla SeatUnit variant corrispondente
-  //     - sinflora.seats_per_ticket = 1 (o 2 per Handicap)
-
-  const plan = slots.map((sl) => {
+  // Costruzione piano base (come dry-run precedente)
+  const plan = normSlots.map((sl) => {
     const compact = hhmmCompact(sl.time!);
     const baseTitle = `${namePrefix || collection} — ${date}`;
     const suProductTitle = baseTitle;
     const suVariantTitle = sl.time!;
     const suVariantSKU   = `SU-${date}-${compact}`;
 
-    // Bundle
     const bundleProductTitle = `${namePrefix || collection} — ${date} ${sl.time}`;
     const bundleHandle = slugify(`${bundleProductTitle}`);
 
@@ -152,9 +190,9 @@ export async function POST(req: NextRequest) {
       const vTitle =
         t.key === "single" ? "Biglietto unico" :
         t.key === "adulto" ? "Adulto" :
-        t.key === "bambino" ? "Bambino" :
-        "Handicap";
+        t.key === "bambino" ? "Bambino" : "Handicap";
       return {
+        key: t.key,
         title: vTitle,
         seats_per_ticket: t.seats,
         metafields: [
@@ -170,46 +208,89 @@ export async function POST(req: NextRequest) {
       capacity,
       locationId,
       seatUnit: {
-        product: {
-          title: suProductTitle,
-          handle: slugify(suProductTitle),
-          tags: ["SeatUnit"],
-        },
-        variant: {
-          title: suVariantTitle,
-          sku: suVariantSKU,
-          inventory: {
-            tracked: true,
-            continueSelling: false,
-            perLocation: locationId ? [{ locationId, available: capacity }] : [],
-          },
-        },
+        product: { title: suProductTitle, handle: slugify(suProductTitle), tags: ["SeatUnit"] },
+        variant: { title: suVariantTitle, sku: suVariantSKU,
+          inventory: { tracked: true, continueSelling: false, perLocation: locationId ? [{ locationId, available: capacity }] : [] } },
       },
       bundle: {
-        product: {
-          title: bundleProductTitle,
-          handle: bundleHandle,
-          tags: ["Bundle"],
-        },
+        product: { title: bundleProductTitle, handle: bundleHandle, tags: ["Bundle"] },
         variants,
       },
     };
   });
 
-  const summary = {
-    date,
-    slots: plan.length,
-    totalBundles: plan.length, // 1 prodotto bundle per slot
-    totalBundleVariants: plan.reduce((sum, p) => sum + p.bundle.variants.length, 0),
-    totalSeatUnitVariants: plan.length, // 1 variante SeatUnit per slot
-  };
+  // -------- Lookup su Shopify (senza scrivere) --------
+  const lookups: Array<{
+    slot: string;
+    seatUnit: { productHandle: string; productId: string|null; variantId: string|null; matchedBy?: "sku"|"title"|null };
+    bundle: { productHandle: string; productId: string|null; variants: Array<{ title: string; id: string|null }> };
+  }> = [];
+
+  for (const p of plan) {
+    // SeatUnit product (stesso titolo per tutti gli slot del giorno)
+    const suHandle = p.seatUnit.product.handle;
+    const suTitle  = p.seatUnit.product.title;
+    const suProd = await fetchProductWithFallback(suHandle, suTitle, "SeatUnit");
+    let suVarId: string|null = null;
+    let suMatchBy: "sku"|"title"|null = null;
+    if (suProd) {
+      const found = findVariantId(suProd, p.seatUnit.variant.title, p.seatUnit.variant.sku);
+      suVarId = found?.id || null;
+      suMatchBy = found?.by || null;
+    }
+
+    // Bundle product
+    const bHandle = p.bundle.product.handle;
+    const bTitle  = p.bundle.product.title;
+    const bProd = await fetchProductWithFallback(bHandle, bTitle, "Bundle");
+
+    const bVarStatuses: Array<{ title: string; id: string|null }> = [];
+    if (bProd) {
+      for (const v of p.bundle.variants) {
+        const found = findVariantId(bProd, v.title, null); // per bundle titoli sono univoci
+        bVarStatuses.push({ title: v.title, id: found?.id || null });
+      }
+    } else {
+      for (const v of p.bundle.variants) bVarStatuses.push({ title: v.title, id: null });
+    }
+
+    lookups.push({
+      slot: `${p.date} ${p.time}`,
+      seatUnit: { productHandle: suHandle, productId: suProd?.id || null, variantId: suVarId, matchedBy: suMatchBy || null },
+      bundle:   { productHandle: bHandle, productId: bProd?.id || null, variants: bVarStatuses },
+    });
+  }
+
+  // Suggerimento azioni (non esegue nulla)
+  const actions = lookups.map((l, i) => {
+    const p = plan[i];
+    const seatUnitActions = [];
+    if (!l.seatUnit.productId) seatUnitActions.push("create_product");
+    if (!l.seatUnit.variantId) seatUnitActions.push("ensure_variant");
+    const bundleActions = [];
+    if (!l.bundle.productId) bundleActions.push("create_product");
+    const missingVars = l.bundle.variants.filter(v => !v.id).map(v => v.title);
+    if (missingVars.length) bundleActions.push(`ensure_variants: ${missingVars.join(", ")}`);
+    return {
+      slot: l.slot,
+      seatUnit: seatUnitActions,
+      bundle: bundleActions,
+    };
+  });
 
   return withCORS(NextResponse.json({
     ok: true,
     dryRun: true,
-    input: { collection, date, capacity, locationId, namePrefix: namePrefix || null },
-    summary,
+    summary: {
+      date,
+      slots: plan.length,
+      totalBundles: plan.length,
+      totalBundleVariants: plan.reduce((s,p)=>s+p.bundle.variants.length, 0),
+      totalSeatUnitVariants: plan.length,
+    },
     plan,
-    note: "Questo è un dry-run: nessuna scrittura. Prossimo step: lookup esistenza su Shopify e poi creazione/aggiornamento.",
+    lookup: lookups,
+    suggestedActions: actions,
+    note: "Solo lookup: nessuna scrittura. Step successivo: endpoint 'apply' che crea/aggiorna realmente.",
   }));
 }
