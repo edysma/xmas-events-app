@@ -198,6 +198,7 @@ async function createProductActive(opts: {
   tags?: string[];
   descriptionHtml?: string;
   publishToPublicationId?: string; // opzionale (non usato direttamente qui, usiamo ENV nell'helper)
+  imageUrl?: string;
 }) {
   // crea ACTIVE
   const res = await adminFetchGQL<{ productCreate: { product?: any; userErrors: { message: string }[] } }>(
@@ -209,6 +210,7 @@ async function createProductActive(opts: {
         templateSuffix: opts.templateSuffix || undefined,
         tags: opts.tags || undefined,
         descriptionHtml: opts.descriptionHtml || undefined,
+        images: opts.imageUrl ? [{ src: opts.imageUrl }] : undefined,
       },
     }
   );
