@@ -474,6 +474,7 @@ export async function POST(req: NextRequest) {
           eventHandle: input.eventHandle,
           date, time, titleBase: input.eventHandle,
           templateSuffix, tags, description,
+          image: imageUrl, 
           dayType: dt, mode, "priceTier€": tier,
           dryRun,
         });
