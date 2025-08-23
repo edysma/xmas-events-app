@@ -286,6 +286,7 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     templateSuffix: input.templateSuffix,
     tags: Array.from(new Set([...(input.tags || []), "SeatUnit"])),
     descriptionHtml: input.description || undefined,
+    imageUrl: input.image || undefined, 
   });
 
   // 4) leggi varianti per ID (niente refetch per titolo/tag)
