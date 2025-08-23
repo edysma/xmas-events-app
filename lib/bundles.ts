@@ -63,11 +63,9 @@ type EnsureBundleResult = {
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function buildSeatTitle(base: string, date: string, time: string) {
-  // Titolo tecnico (nascosto) per i Posti -> formato ISO per evitare collisioni
   return `${base} — ${date} ${time}`;
 }
 function buildBundleTitle(base: string, date: string, time: string) {
-  // Titolo visibile per i Biglietti -> formato DD/MM/YYYY
   const [y, m, d] = date.split("-");
   return `${base} — ${d}/${m}/${y} ${time}`;
 }
@@ -246,7 +244,14 @@ async function createProductActive(opts: {
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
 
+  // 1) Pubblica Negozio online (default o ID passato)
   await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
+
+  // 2) Pubblica anche sul canale "Xmas Admin API v2" se configurato in ENV
+  const xmasPubId = getXmasAdminPublicationId();
+  if (xmasPubId) {
+    await publishProductToPublication({ productId: product.id, publicationId: xmasPubId });
+  }
 
   return product;
 }
@@ -283,14 +288,12 @@ function mapVariantIdsFromNodes(nodes: any[]): Record<"unico" | "adulto" | "bamb
 
 /* ------ helper: attach featured image al prodotto ------ */
 async function attachFeaturedImage(productId: string, imageUrl: string) {
-  // Prova l'upload in Files (tollerante in caso di URL pubblico/già presente)
   try {
     await uploadFileFromUrl(imageUrl, { contentType: "IMAGE" });
   } catch {
     // ok se già presente o URL pubblico
   }
 
-  // 1) Collega l'immagine come Media al prodotto
   const createRes = await adminFetchGQL<{
     productCreateMedia: {
       media?: { id: string }[];
@@ -311,7 +314,6 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
   const mediaId = createRes?.productCreateMedia?.media?.[0]?.id;
   if (!mediaId) throw new Error("productCreateMedia: nessun media creato/collegato");
 
-  // 2) Imposta come featured
   const featRes = await adminFetchGQL<{ productSetFeaturedMedia: { userErrors?: { message: string }[] } }>(
     M_PRODUCT_SET_FEATURED,
     { productId, mediaId }
@@ -331,7 +333,6 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
 export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<EnsureSeatUnitResult> {
   const seatTitle = buildSeatTitle(input.titleBase, input.date, input.time);
 
-  // 1) cerco per titolo esatto + tag SeatUnit
   const existing = await findProductByExactTitle(seatTitle, "SeatUnit");
   if (existing) {
     const variantId = existing.variants?.edges?.[0]?.node?.id;
@@ -339,7 +340,6 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     return { productId: existing.id, variantId, created: false };
   }
 
-  // 2) dry-run
   if (input.dryRun) {
     return {
       productId: "gid://shopify/Product/NEW_SEAT_DRYRUN",
@@ -348,7 +348,6 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     };
   }
 
-  // 3) crea prodotto ACTIVE + publish
   const product = await createProductActive({
     title: seatTitle,
     templateSuffix: input.templateSuffix,
@@ -356,7 +355,6 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     descriptionHtml: input.description || undefined,
   });
 
-  // 4) leggi varianti per ID
   const prodFull = await getProductById(product.id);
   const variantId = prodFull?.variants?.edges?.[0]?.node?.id;
   if (!variantId) throw new Error("Seat creato ma senza variante (post read-by-id)");
@@ -375,7 +373,6 @@ export async function ensureInventory(opts: {
 }) {
   const locationId = opts.locationId || (await getDefaultLocationId());
 
-  // Dry-run: non scrive, ma torna anteprima utile
   if (opts.dryRun) {
     return {
       ok: true,
@@ -384,7 +381,6 @@ export async function ensureInventory(opts: {
     };
   }
 
-  // Per inventorySetQuantities serve l'inventoryItemId
   const Q_VAR = /* GraphQL */ `
     query VariantInv($id: ID!) {
       productVariant(id: $id) { id inventoryItem { id } }
@@ -394,7 +390,6 @@ export async function ensureInventory(opts: {
   const inventoryItemId = varData.productVariant?.inventoryItem?.id;
   if (!inventoryItemId) throw new Error("inventoryItem non trovato per la variante");
 
-  // Input OGGETTO (InventorySetQuantitiesInput), non array
   const gqlInput = {
     name: "available" as const,
     reason: "correction" as const,
@@ -416,13 +411,11 @@ export async function ensureInventory(opts: {
 }
 
 /**
- * Crea/riusa il prodotto "Bundle" (ACTIVE + pubblicato) e assicura le varianti richieste
- * (modalità "unico" -> solo "Biglietto unico"; modalità "triple" -> Adulto/Bambino/Handicap).
+ * Crea/riusa il prodotto "Bundle" (ACTIVE + pubblicato) e assicura le varianti richieste.
  */
 export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBundleResult> {
   const title = buildBundleTitle(input.titleBase, input.date, input.time);
 
-  // 1) se già esiste, mappa le varianti per Title (filtrato su tag Bundle)
   const existing = await findProductByExactTitle(title, "Bundle");
   if (existing) {
     const current: Record<string, string | undefined> = {};
@@ -436,7 +429,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       else if (t.includes("bambino")) current["bambino"] = v.id;
       else if (t.includes("handicap")) current["handicap"] = v.id;
     }
-    // se mancano varianti richieste, le aggiungo
     const needed = variantNamesForMode(input.mode).filter((k) => !current[k]);
     if (needed.length && !input.dryRun) {
       const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
@@ -475,7 +467,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     };
   }
 
-  // 2) se dryRun, ritorno placeholder mappa
   if (input.dryRun) {
     const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
       unico: "gid://shopify/ProductVariant/DRYRUN_UNICO",
@@ -487,7 +478,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     return { productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN", variantMap: ret, createdProduct: false, createdVariants: 0 };
   }
 
-  // 3) crea prodotto (ACTIVE + publish)
+  // crea prodotto (ACTIVE + publish sui canali configurati)
   const product = await createProductActive({
     title,
     templateSuffix: input.templateSuffix,
@@ -496,7 +487,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     imageUrl: undefined, // feature image la settiamo dopo via media
   });
 
-  // 4) attach featured image se presente
+  // attach featured image se presente
   if (input.image) {
     try {
       await attachFeaturedImage(product.id, input.image);
@@ -505,7 +496,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     }
   }
 
-  // 5) crea varianti richieste
+  // varianti richieste
   const needed = variantNamesForMode(input.mode);
   const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
 
@@ -516,11 +507,9 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
   const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
-  // 6) usa direttamente le varianti restituite (no refetch per titolo/tag)
   const created = out.productVariantsBulkCreate.productVariants || [];
   const ret = mapVariantIdsFromNodes(created);
 
-  // Fallback: se non arrivano varianti, refetch by id
   if (!ret.unico && !ret.adulto && !ret.bambino && !ret.handicap) {
     const full = await getProductById(product.id);
     const edges = full?.variants?.edges?.map((e: any) => e.node) || [];
@@ -533,7 +522,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
 
 /**
  * Aggiorna il prezzo di 1..n varianti (EURO).
- * Accetta mappa { variantId: prezzoEuro }.
  */
 export async function setVariantPrices(
   productId: string,
@@ -543,7 +531,6 @@ export async function setVariantPrices(
     .filter(([, eur]) => typeof eur === "number" && Number.isFinite(eur as number))
     .map(([id, eur]) => ({
       id,
-      // Schema 2024-10: price come STRINGA decimale (niente currencyCode)
       price: (eur as number).toFixed(2),
     }));
 
@@ -566,25 +553,20 @@ export async function setVariantPrices(
 }
 
 /**
- * Collega un Seat Unit (seatVariantId) come componente di una variante Bundle (bundleVariantId).
- * Usa productVariantRelationshipBulkUpdate con:
- * - parentProductVariantId
- * - productVariantRelationshipsToCreate / ...ToUpdate
+ * Collega un Seat Unit come componente di una variante Bundle.
  */
 export async function ensureVariantLeadsToSeat(opts: {
-  bundleVariantId: string;       // variante del Bundle (parent)
-  seatVariantId: string;         // variante del Seat Unit (component)
-  componentQuantity?: number;    // default 1 (per Handicap passa 2 dal chiamante)
+  bundleVariantId: string;
+  seatVariantId: string;
+  componentQuantity?: number;
   dryRun?: boolean;
 }) {
   const { bundleVariantId, seatVariantId, componentQuantity = 1, dryRun } = opts;
 
   if (dryRun) {
-    // niente chiamate reali, ma ritorniamo una shape coerente
     return { ok: true, created: false, updated: false, qty: componentQuantity };
   }
 
-  // 1) Prova a CREARE la relazione
   const createInput = [
     {
       parentProductVariantId: bundleVariantId,
@@ -600,12 +582,10 @@ export async function ensureVariantLeadsToSeat(opts: {
   );
   const errs = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
   if (!errs.length) {
-    // opzionale: attendi visibilità
     await ensureVariantEventuallyVisible(bundleVariantId);
     return { ok: true, created: true, updated: false, qty: componentQuantity };
   }
 
-  // 2) Se già esiste, fai UPDATE della quantità
   const updateInput = [
     {
       parentProductVariantId: bundleVariantId,
@@ -625,12 +605,10 @@ export async function ensureVariantLeadsToSeat(opts: {
     return { ok: true, created: false, updated: true, qty: componentQuantity };
   }
 
-  // 3) Ancora errore: esponi i messaggi
   const all = [...errs, ...errs2].map((e) => e?.message || JSON.stringify(e)).join("; ");
   throw new Error(`Shopify GQL errors (ensureVariantLeadsToSeat): ${all}`);
 }
 
-// Per alcune letture immediate, la nuova variante può non essere ancora "visibile". Attendi fino a 1.5s
 async function ensureVariantEventuallyVisible(variantId: string, tries = 5) {
   const Q = /* GraphQL */ `
     query PV($id: ID!) {
@@ -640,11 +618,11 @@ async function ensureVariantEventuallyVisible(variantId: string, tries = 5) {
   for (let i = 0; i < tries; i++) {
     try {
       const r = await adminFetchGQL<{ productVariant: { id: string } | null }>(Q, { id: variantId });
-      if (r?.productVariant?.id) return; // ok, esiste
+      if (r?.productVariant?.id) return;
     } catch {
-      // ignora e riprova
+      // ignore
     }
-    await delay(150 * (i + 1)); // 150, 300, 600, 900, 1200, 1500 ms
+    await delay(150 * (i + 1));
   }
   throw new Error(`Variant not ready/visible: ${variantId}`);
 }
