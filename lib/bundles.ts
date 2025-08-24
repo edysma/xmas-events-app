@@ -56,18 +56,43 @@ type EnsureBundleResult = {
 // --- Utils ---
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function buildSeatTitle(base: string, date: string, time: string) {
-  return ${base} — ${date} ${time};
+  return `${base} — ${date} ${time}`;
 }
 function buildBundleTitle(base: string, date: string, time: string) {
   const [y, m, d] = date.split("-");
-  return ${base} — ${d}/${m}/${y} ${time};
+  return `${base} — ${d}/${m}/${y} ${time}`;
 }
 
 // --- GQL snippets (version-agnostic per 2024-07/2024-10) ---
-const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ query FindProductByTitle($q: String!) {
-  products(first: 1, query: $q) {
-    edges {
-      node {
+const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ `
+  query FindProductByTitle($q: String!) {
+    products(first: 1, query: $q) {
+      edges {
+        node {
+          id
+          title
+          status
+          templateSuffix
+          tags
+          variants(first: 20) {
+            edges {
+              node {
+                id
+                title
+                selectedOptions { name value }
+                inventoryItem { id }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+const M_PRODUCT_CREATE = /* GraphQL */ `
+  mutation ProductCreate($input: ProductInput!) {
+    productCreate(input: $input) {
+      product {
         id
         title
         status
@@ -84,12 +109,13 @@ const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ query FindProductByTitle($q: Strin
           }
         }
       }
+      userErrors { field message }
     }
   }
-} ;
-const M_PRODUCT_CREATE = /* GraphQL */ mutation ProductCreate($input: ProductInput!) {
-  productCreate(input: $input) {
-    product {
+`;
+const Q_PRODUCT_BY_ID = /* GraphQL */ `
+  query ProductById($id: ID!) {
+    product(id: $id) {
       id
       title
       status
@@ -106,104 +132,106 @@ const M_PRODUCT_CREATE = /* GraphQL */ mutation ProductCreate($input: ProductInp
         }
       }
     }
-    userErrors { field message }
   }
-} ;
-const Q_PRODUCT_BY_ID = /* GraphQL */ query ProductById($id: ID!) {
-  product(id: $id) {
-    id
-    title
-    status
-    templateSuffix
-    tags
-    variants(first: 20) {
-      edges {
-        node {
-          id
-          title
-          selectedOptions { name value }
-          inventoryItem { id }
-        }
+`;
+const M_PRODUCT_UPDATE = /* GraphQL */ `
+  mutation ProductUpdate($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product { id title status templateSuffix tags }
+      userErrors { field message }
+    }
+  }
+`;
+const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
+  mutation PVBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy!) {
+    productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
+      productVariants {
+        id
+        title
+        selectedOptions { name value }
       }
+      userErrors { field message }
     }
   }
-} ;
-const M_PRODUCT_UPDATE = /* GraphQL */ mutation ProductUpdate($input: ProductInput!) {
-  productUpdate(input: $input) {
-    product { id title status templateSuffix tags }
-    userErrors { field message }
-  }
-} ;
-const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ mutation PVBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy!) {
-  productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
-    productVariants {
-      id
-      title
-      selectedOptions { name value }
+`;
+const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ `
+  mutation PVRRelBulkUpdate($input: [ProductVariantRelationshipUpdateInput!]!) {
+    productVariantRelationshipBulkUpdate(input: $input) {
+      userErrors { field message }
     }
-    userErrors { field message }
   }
-} ;
-const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ mutation PVRRelBulkUpdate($input: [ProductVariantRelationshipUpdateInput!]!) {
-  productVariantRelationshipBulkUpdate(input: $input) {
-    userErrors { field message }
-  }
-} ;
+`;
 // Inventario: payload corretto (input = InventorySetQuantitiesInput!)
-const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ mutation InvSet($input: InventorySetQuantitiesInput!) {
-  inventorySetQuantities(input: $input) {
-    inventoryAdjustmentGroup {
-      createdAt reason referenceDocumentUri
-      changes { name delta quantityAfterChange }
+const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
+  mutation InvSet($input: InventorySetQuantitiesInput!) {
+    inventorySetQuantities(input: $input) {
+      inventoryAdjustmentGroup {
+        createdAt
+        reason
+        referenceDocumentUri
+        changes { name delta quantityAfterChange }
+      }
+      userErrors { field message }
     }
-    userErrors { field message }
   }
-} ;
+`;
 /* ---------- MEDIA: attach featured image ---------- */
-const M_PRODUCT_CREATE_MEDIA = /* GraphQL */ mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
-  productCreateMedia(productId: $productId, media: $media) {
-    media {
-      ... on MediaImage { id image { url } }
+const M_PRODUCT_CREATE_MEDIA = /* GraphQL */ `
+  mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+    productCreateMedia(productId: $productId, media: $media) {
+      media {
+        ... on MediaImage { id image { url } }
+      }
+      mediaUserErrors { field message }
     }
-    mediaUserErrors { field message }
   }
-} ;
-const M_PRODUCT_SET_FEATURED = /* GraphQL */ mutation ProductSetFeatured($productId: ID!, $mediaId: ID!) {
-  productSetFeaturedMedia(productId: $productId, mediaId: $mediaId) {
-    product { id featuredMedia { id } }
-    userErrors { field message }
+`;
+const M_PRODUCT_SET_FEATURED = /* GraphQL */ `
+  mutation ProductSetFeatured($productId: ID!, $mediaId: ID!) {
+    productSetFeaturedMedia(productId: $productId, mediaId: $mediaId) {
+      product { id featuredMedia { id } }
+      userErrors { field message }
+    }
   }
-} ;
+`;
 /* ---------- Tracking scorte (PATCH) ---------- */
-const Q_VARIANT_ITEM = /* GraphQL */ query VariantItem($id: ID!) {
-  productVariant(id: $id) {
-    id
-    inventoryItem { id }
+const Q_VARIANT_ITEM = /* GraphQL */ `
+  query VariantItem($id: ID!) {
+    productVariant(id: $id) {
+      id
+      inventoryItem { id }
+    }
   }
-} ;
-const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ mutation InvItemUpdate($id: ID!, $input: InventoryItemInput!) {
-  inventoryItemUpdate(id: $id, input: $input) {
-    inventoryItem { id tracked }
-    userErrors { field message }
+`;
+const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ `
+  mutation InvItemUpdate($id: ID!, $input: InventoryItemInput!) {
+    inventoryItemUpdate(id: $id, input: $input) {
+      inventoryItem { id tracked }
+      userErrors { field message }
+    }
   }
-} ;
-const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-    userErrors { field message }
+`;
+const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
+  mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      userErrors { field message }
+    }
   }
-} ;
+`;
 // Scrive/aggiorna metafield su vari owner (qui: varianti)
-const M_METAFIELDS_SET = /* GraphQL */ mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
-  metafieldsSet(metafields: $metafields) {
-    metafields { id }
-    userErrors { field message }
+const M_METAFIELDS_SET = /* GraphQL */ `
+  mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      metafields { id }
+      userErrors { field message }
+    }
   }
-} ;
+`;
 
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string, mustHaveTag?: string) {
-  const parts = [title:"${title.replace(/"/g, '\\"')}"];
-  if (mustHaveTag) parts.push(tag:${mustHaveTag});
+  const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
+  if (mustHaveTag) parts.push(`tag:${mustHaveTag}`);
   const q = parts.join(" ");
   const data = await adminFetchGQL<{ products: { edges: any[] } }>(Q_FIND_PRODUCT_BY_TITLE, { q });
   const node = data?.products?.edges?.[0]?.node;
@@ -256,7 +284,7 @@ async function createProductActive(opts: {
     }
   );
   const errs = (res as any).productCreate?.userErrors || [];
-  if (errs.length) throw new Error(productCreate error: ${errs.map((e: any) => e.message).join(" | ")});
+  if (errs.length) throw new Error(`productCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
   // 1) Pubblica Negozio online (default o ID passato)
@@ -305,7 +333,7 @@ async function getInventoryItemId(variantId: string): Promise<string> {
     { id: variantId }
   );
   const invId = r?.productVariant?.inventoryItem?.id;
-  if (!invId) throw new Error(inventoryItem non trovato per la variante ${variantId});
+  if (!invId) throw new Error(`inventoryItem non trovato per la variante ${variantId}`);
   return invId;
 }
 /**
@@ -331,7 +359,7 @@ async function setVariantTracking(params: {
     });
     const errs1 = (upd as any)?.inventoryItemUpdate?.userErrors ?? [];
     if (errs1.length) {
-      throw new Error(inventoryItemUpdate error: ${errs1.map((e: any) => e.message).join(" | ")});
+      throw new Error(`inventoryItemUpdate error: ${errs1.map((e: any) => e.message).join(" | ")}`);
     }
   }
   // 2) Allinea inventoryPolicy sulla variante
@@ -342,7 +370,7 @@ async function setVariantTracking(params: {
   );
   const errs2 = (r as any)?.productVariantsBulkUpdate?.userErrors ?? [];
   if (errs2.length) {
-    throw new Error(productVariantsBulkUpdate(track) error: ${errs2.map((e: any) => e.message).join(" | ")});
+    throw new Error(`productVariantsBulkUpdate(track) error: ${errs2.map((e: any) => e.message).join(" | ")}`);
   }
 }
 
@@ -351,7 +379,8 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
   try {
     // Non fa male provare a creare il file (se già presente/URL pubblico, si ignora l'errore)
     await uploadFileFromUrl(imageUrl, { contentType: "IMAGE" });
-  } catch { // ignore
+  } catch {
+    // ignore
   }
   const createRes = await adminFetchGQL<{ productCreateMedia: { media?: { id: string }[]; mediaUserErrors?: { field?: string[]; message: string }[]; }; }>(M_PRODUCT_CREATE_MEDIA, {
     productId,
@@ -360,7 +389,7 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
   const mErrs = (createRes?.productCreateMedia?.mediaUserErrors as { field?: string[]; message: string }[] | undefined) || [];
   if (mErrs.length) {
     const msg = mErrs.map((e: { message: string }) => e.message).join(" | ");
-    throw new Error(productCreateMedia error: ${msg});
+    throw new Error(`productCreateMedia error: ${msg}`);
   }
   const mediaId = createRes?.productCreateMedia?.media?.[0]?.id;
   if (!mediaId) throw new Error("productCreateMedia: nessun media creato/collegato");
@@ -371,7 +400,7 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
   const fErrs = ((featRes as any)?.productSetFeaturedMedia?.userErrors as { message: string }[] | undefined) || [];
   if (fErrs.length) {
     const msg = fErrs.map((e: { message: string }) => e.message).join(" | ");
-    throw new Error(productSetFeaturedMedia error: ${msg});
+    throw new Error(`productSetFeaturedMedia error: ${msg}`);
   }
 }
 
@@ -439,12 +468,14 @@ export async function ensureInventory(opts: {
       set: { variantId: opts.variantId, locationId, name: "available", quantity: opts.quantity },
     };
   }
-  const Q_VAR = /* GraphQL */ query VariantInv($id: ID!) {
-    productVariant(id: $id) {
-      id
-      inventoryItem { id }
+  const Q_VAR = /* GraphQL */ `
+    query VariantInv($id: ID!) {
+      productVariant(id: $id) {
+        id
+        inventoryItem { id }
+      }
     }
-  } ;
+  `;
   const varData = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } }>(Q_VAR, { id: opts.variantId });
   const inventoryItemId = varData.productVariant?.inventoryItem?.id;
   if (!inventoryItemId) throw new Error("inventoryItem non trovato per la variante");
@@ -452,7 +483,7 @@ export async function ensureInventory(opts: {
     name: "available" as const,
     reason: "correction" as const,
     ignoreCompareQuantity: true,
-    referenceDocumentUri: gid://sinflora-xmas/Generate/${Date.now()},
+    referenceDocumentUri: `gid://sinflora-xmas/Generate/${Date.now()}`,
     quantities: [
       { inventoryItemId, locationId, quantity: opts.quantity, compareQuantity: null },
     ],
@@ -462,7 +493,7 @@ export async function ensureInventory(opts: {
     { input: gqlInput }
   );
   const errs = (res as any).inventorySetQuantities?.userErrors || [];
-  if (errs.length) throw new Error(inventorySetQuantities error: ${errs.map((e: any) => e.message).join(" | ")});
+  if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map((e: any) => e.message).join(" | ")}`);
   return { ok: true };
 }
 
@@ -504,7 +535,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
         { productId: existing.id, variants, strategy: "REMOVE_STANDALONE_VARIANT" }
       );
       const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
-      if (errs.length) throw new Error(variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")});
+      if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
       const created = out.productVariantsBulkCreate.productVariants || [];
       const createdMap = mapVariantIdsFromNodes(created);
       // tracking OFF anche sulle nuove
@@ -581,7 +612,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     { productId: product.id, variants, strategy: "REMOVE_STANDALONE_VARIANT" }
   );
   const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
-  if (errs.length) throw new Error(variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")});
+  if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
   // varianti create
   const created = out.productVariantsBulkCreate.productVariants || [];
   const ret = mapVariantIdsFromNodes(created);
@@ -627,17 +658,19 @@ export async function setVariantPrices(
       id,
       price: (eur as number).toFixed(2),
     }));
-  const M = /* GraphQL */ mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-      userErrors { field message }
+  const M = /* GraphQL */ `
+    mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        userErrors { field message }
+      }
     }
-  } ;
+  `;
   const r = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors: { message: string }[] } }>(M, {
     productId,
     variants: variantsInput,
   });
   const errs = (r as any).productVariantsBulkUpdate?.userErrors || [];
-  if (errs.length) throw new Error(productVariantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")});
+  if (errs.length) throw new Error(`productVariantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
   return { ok: true };
 }
 
@@ -715,19 +748,22 @@ export async function ensureVariantLeadsToSeat(opts: {
     return { ok: true, created: false, updated: true, qty: componentQuantity };
   }
   const all = [...errs, ...errs2].map((e) => e?.message || JSON.stringify(e)).join("; ");
-  throw new Error(Shopify GQL errors (ensureVariantLeadsToSeat): ${all});
+  throw new Error(`Shopify GQL errors (ensureVariantLeadsToSeat): ${all}`);
 }
 async function ensureVariantEventuallyVisible(variantId: string, tries = 5) {
-  const Q = /* GraphQL */ query PV($id: ID!) {
-    productVariant(id: $id) { id }
-  } ;
+  const Q = /* GraphQL */ `
+    query PV($id: ID!) {
+      productVariant(id: $id) { id }
+    }
+  `;
   for (let i = 0; i < tries; i++) {
     try {
       const r = await adminFetchGQL<{ productVariant: { id: string } | null }>(Q, { id: variantId });
       if (r?.productVariant?.id) return;
-    } catch { // ignore
+    } catch {
+      // ignore
     }
     await delay(150 * (i + 1));
   }
-  throw new Error(Variant not ready/visible: ${variantId});
+  throw new Error(`Variant not ready/visible: ${variantId}`);
 }
