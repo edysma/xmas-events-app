@@ -19,6 +19,9 @@ import type {
   PricesEuro,
 } from "@/types/generate";
 
+export const runtime = "nodejs";
+export const maxDuration = 800;
+
 const TZ = "Europe/Rome";
 
 /* ---------------- utils date/day ---------------- */
@@ -209,8 +212,10 @@ async function generateFromFeed(req: NextRequest, body: any) {
     return NextResponse.json({ ok: false, error: "missing_capacity", detail: 'Passa "capacityPerSlot" > 0' }, { status: 400 });
   }
 
+  const publish: boolean = body.publish !== false; // default ON
   const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
-  if (!publicationId) {
+
+  if (publish && !publicationId) {
     return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
   }
 
@@ -327,11 +332,13 @@ async function generateFromFeed(req: NextRequest, body: any) {
         pricesUpdated += Object.keys(pricesToSet).length;
       }
 
-      // activate + publish (Seat + Bundle)
-      await activateProduct(seat.productId);
-      await publishProductToPublication({ productId: seat.productId, publicationId });
-      await activateProduct(bundle.productId);
-      await publishProductToPublication({ productId: bundle.productId, publicationId });
+      // activate + publish (solo se publish==true)
+      if (publish && publicationId) {
+        await activateProduct(seat.productId);
+        await publishProductToPublication({ productId: seat.productId, publicationId });
+        await activateProduct(bundle.productId);
+        await publishProductToPublication({ productId: bundle.productId, publicationId });
+      }
 
       // preview breve (solo primi 10)
       if (preview.length < 10) {
@@ -378,6 +385,7 @@ export async function POST(req: NextRequest) {
       tags?: string[];
       description?: string;
       imageUrl?: string;
+      publish?: boolean; // <- opzionale, default ON
     };
     try {
       body = await req.json();
@@ -410,11 +418,13 @@ export async function POST(req: NextRequest) {
       tags?: string[];
       description?: string;
       imageUrl?: string;
+      publish?: boolean;
     };
     const dryRun = input.dryRun !== false; // default true
+    const publish: boolean = input.publish !== false; // default ON
 
     const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
-    if (!dryRun && !publicationId) {
+    if (!dryRun && publish && !publicationId) {
       return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
     }
 
@@ -474,7 +484,7 @@ export async function POST(req: NextRequest) {
           eventHandle: input.eventHandle,
           date, time, titleBase: input.eventHandle,
           templateSuffix, tags, description,
-          image: imageUrl, 
+          image: imageUrl,
           dayType: dt, mode, "priceTier€": tier,
           dryRun,
         });
@@ -516,8 +526,8 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Activate + Publish (quando non è dry-run)
-        if (!dryRun && publicationId) {
+        // Activate + Publish (solo se publish==true)
+        if (!dryRun && publish && publicationId) {
           await activateProduct(seat.productId);
           await publishProductToPublication({ productId: seat.productId, publicationId });
           await activateProduct(bundle.productId);
