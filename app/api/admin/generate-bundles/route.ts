@@ -1,4 +1,7 @@
 // app/api/admin/generate-bundles/route.ts
+export const runtime = "nodejs";
+export const maxDuration = 800;
+
 import { NextRequest, NextResponse } from "next/server";
 import { adminFetchGQL, getShopPublicHolidays, publishProductToPublication } from "@/lib/shopify-admin";
 import {
@@ -18,9 +21,6 @@ import type {
   PriceTierEuro,
   PricesEuro,
 } from "@/types/generate";
-
-export const runtime = "nodejs";
-export const maxDuration = 800;
 
 const TZ = "Europe/Rome";
 
@@ -201,6 +201,8 @@ async function previewFromFeed(req: NextRequest, body: any) {
 }
 
 async function generateFromFeed(req: NextRequest, body: any) {
+  const publish = body.publish !== false; // default ON
+
   // Validazioni minime per creazione reale
   if (body.dryRun !== false) {
     return NextResponse.json({ ok: false, error: "bad_request", detail: "dryRun:false richiesto per creare dal feed" }, { status: 400 });
@@ -212,9 +214,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
     return NextResponse.json({ ok: false, error: "missing_capacity", detail: 'Passa "capacityPerSlot" > 0' }, { status: 400 });
   }
 
-  const publish: boolean = body.publish !== false; // default ON
-  const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
-
+  const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || "";
   if (publish && !publicationId) {
     return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
   }
@@ -289,7 +289,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
 
       // crea/riusa Seat
       const seat = await ensureSeatUnit({
-        date, time, titleBase: eventHandle, tags, description, templateSuffix, dryRun: false,
+        date, time, titleBase: eventHandle, tags, description, templateSuffix, dryRun: false, publish,
       });
       if (seat.created) seatsCreated++;
 
@@ -302,7 +302,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
       // bundle triple
       const bundle = await ensureBundle({
         eventHandle, date, time, titleBase: eventHandle, templateSuffix, tags, description,
-        dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false,
+        dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false, publish,
       });
       if (bundle.createdProduct) bundlesCreated++;
       variantsCreated += bundle.createdVariants ?? 0;
@@ -332,7 +332,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
         pricesUpdated += Object.keys(pricesToSet).length;
       }
 
-      // activate + publish (solo se publish==true)
+      // activate + publish (solo se richiesto)
       if (publish && publicationId) {
         await activateProduct(seat.productId);
         await publishProductToPublication({ productId: seat.productId, publicationId });
@@ -385,7 +385,7 @@ export async function POST(req: NextRequest) {
       tags?: string[];
       description?: string;
       imageUrl?: string;
-      publish?: boolean; // <- opzionale, default ON
+      publish?: boolean;
     };
     try {
       body = await req.json();
@@ -421,9 +421,9 @@ export async function POST(req: NextRequest) {
       publish?: boolean;
     };
     const dryRun = input.dryRun !== false; // default true
-    const publish: boolean = input.publish !== false; // default ON
+    const publish = input.publish !== false; // default ON
 
-    const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
+    const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || "";
     if (!dryRun && publish && !publicationId) {
       return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
     }
@@ -467,7 +467,7 @@ export async function POST(req: NextRequest) {
 
         // Seat Unit
         const seat = await ensureSeatUnit({
-          date, time, titleBase: input.eventHandle, tags, description, templateSuffix, dryRun,
+          date, time, titleBase: input.eventHandle, tags, description, templateSuffix, dryRun, publish,
         });
         if (!dryRun && seat.created) seatsCreated++;
 
@@ -486,7 +486,7 @@ export async function POST(req: NextRequest) {
           templateSuffix, tags, description,
           image: imageUrl,
           dayType: dt, mode, "priceTier€": tier,
-          dryRun,
+          dryRun, publish,
         });
         if (!dryRun) {
           if (bundle.createdProduct) bundlesCreated++;
@@ -526,7 +526,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Activate + Publish (solo se publish==true)
+        // Activate + Publish (solo se richiesto)
         if (!dryRun && publish && publicationId) {
           await activateProduct(seat.productId);
           await publishProductToPublication({ productId: seat.productId, publicationId });
