@@ -166,7 +166,6 @@ const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
 
 /* ---------- MEDIA: attach featured image ---------- */
 
-// Crea media (collega un'immagine al prodotto)
 const M_PRODUCT_CREATE_MEDIA = /* GraphQL */ `
   mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
     productCreateMedia(productId: $productId, media: $media) {
@@ -176,7 +175,6 @@ const M_PRODUCT_CREATE_MEDIA = /* GraphQL */ `
   }
 `;
 
-// Imposta media in evidenza (featured)
 const M_PRODUCT_SET_FEATURED = /* GraphQL */ `
   mutation ProductSetFeatured($productId: ID!, $mediaId: ID!) {
     productSetFeaturedMedia(productId: $productId, mediaId: $mediaId) {
@@ -188,14 +186,12 @@ const M_PRODUCT_SET_FEATURED = /* GraphQL */ `
 
 /* ---------- Tracking scorte (PATCH) ---------- */
 
-// Per ottenere l'inventoryItemId di una variante
 const Q_VARIANT_ITEM = /* GraphQL */ `
   query VariantItem($id: ID!) {
     productVariant(id: $id) { id inventoryItem { id } }
   }
 `;
 
-// InventoryItem: abilita/disabilita tracking
 const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ `
   mutation InvItemUpdate($id: ID!, $input: InventoryItemInput!) {
     inventoryItemUpdate(id: $id, input: $input) {
@@ -205,7 +201,6 @@ const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ `
   }
 `;
 
-// Variants bulk update: qui usiamo SOLO inventoryPolicy
 const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
   mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -229,7 +224,6 @@ async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   return node;
 }
 
-// (tenuto per completezza, al momento non forzato qui)
 function getOnlineStorePublicationIdOrThrow(): string {
   const id = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
   if (!id) {
@@ -277,10 +271,8 @@ async function createProductActive(opts: {
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
 
-  // 1) Pubblica Negozio online (default o ID passato)
   await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
 
-  // 2) Pubblica anche sul canale "Xmas Admin API v2" se configurato in ENV
   const xmasPubId = getXmasAdminPublicationId();
   if (xmasPubId) {
     await publishProductToPublication({ productId: product.id, publicationId: xmasPubId });
@@ -373,7 +365,6 @@ async function setVariantTracking(params: {
 /* ------ helper: attach featured image al prodotto ------ */
 async function attachFeaturedImage(productId: string, imageUrl: string) {
   try {
-    // Non fa male provare a creare il file (se già presente/URL pubblico, si ignora l'errore)
     await uploadFileFromUrl(imageUrl, { contentType: "IMAGE" });
   } catch {
     // ignore
@@ -424,7 +415,6 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     const variantId = existing.variants?.edges?.[0]?.node?.id;
     if (!variantId) throw new Error("Seat esistente ma senza variante");
 
-    // Assicura tracking ON anche sugli esistenti
     await setVariantTracking({
       productId: existing.id,
       variantIds: [variantId],
@@ -450,7 +440,6 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     descriptionHtml: input.description || undefined,
   });
 
-  // Leggi variante e abilita tracking
   const prodFull = await getProductById(product.id);
   const variantId = prodFull?.variants?.edges?.[0]?.node?.id;
   if (!variantId) throw new Error("Seat creato ma senza variante (post read-by-id)");
@@ -535,7 +524,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       else if (t.includes("handicap")) current["handicap"] = v.id;
     }
 
-    // Tracking OFF/CONTINUE anche per gli esistenti
     const existingVariantIds = Object.values(current).filter(Boolean) as string[];
     if (existingVariantIds.length) {
       await setVariantTracking({
@@ -546,7 +534,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       });
     }
 
-    // se mancano varianti richieste, le aggiungo
     const needed = variantNamesForMode(input.mode).filter((k) => !current[k]);
     if (needed.length && !input.dryRun) {
       const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
@@ -560,7 +547,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       const created = out.productVariantsBulkCreate.productVariants || [];
       const createdMap = mapVariantIdsFromNodes(created);
 
-      // tracking OFF anche sulle nuove
       const newIds = created.map(v => v.id).filter(Boolean) as string[];
       if (newIds.length) {
         await setVariantTracking({
@@ -612,12 +598,12 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
   const product = await createProductActive({
     title,
     templateSuffix: input.templateSuffix,
-    tags: Array.from(new Set([...(input.tags || []), "Bundle", input.eventHandle].filter(Boolean))),
+    // ⬇️ SOLO i tag scelti in UI + "Bundle" (niente auto-tag col eventHandle)
+    tags: Array.from(new Set([...(input.tags || []), "Bundle"])),
     descriptionHtml: input.description || undefined,
-    imageUrl: undefined, // feature image la settiamo dopo via media
+    imageUrl: undefined,
   });
 
-  // attach featured image se presente
   if (input.image) {
     try {
       await attachFeaturedImage(product.id, input.image);
@@ -626,7 +612,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     }
   }
 
-  // varianti richieste
   const needed = variantNamesForMode(input.mode);
   const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
 
@@ -637,11 +622,9 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
   const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
-  // varianti create
   const created = out.productVariantsBulkCreate.productVariants || [];
   const ret = mapVariantIdsFromNodes(created);
 
-  // Tracking OFF/CONTINUE sulle nuove varianti
   const createdIds = created.map(v => v.id).filter(Boolean) as string[];
   if (createdIds.length) {
     await setVariantTracking({
@@ -652,7 +635,6 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     });
   }
 
-  // Se per qualsiasi motivo non arrivano le varianti, fallback: leggi per ID e applica tracking OFF
   if (!ret.unico && !ret.adulto && !ret.bambino && !ret.handicap) {
     const full = await getProductById(product.id);
     const edges = full?.variants?.edges?.map((e: any) => e.node) || [];
