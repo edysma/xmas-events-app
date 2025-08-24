@@ -49,7 +49,7 @@ const QUERY_PRODUCT_VARIANTS = /* GraphQL */ `
 `;
 
 const MUT_PRODUCT_CREATE = /* GraphQL */ `
-  mutation CreateProduct($input: ProductCreateInput!) {
+  mutation CreateProduct($input: ProductInput!) {
     productCreate(input: $input) {
       product { id title handle status }
       userErrors { field message }
