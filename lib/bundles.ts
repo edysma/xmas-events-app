@@ -209,6 +209,16 @@ const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
   }
 `;
 
+// Scrive/aggiorna metafield su vari owner (qui: varianti)
+const M_METAFIELDS_SET = /* GraphQL */ `
+  mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      metafields { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
@@ -224,6 +234,7 @@ async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   return node;
 }
 
+// (tenuto per completezza, al momento non forzato qui)
 function getOnlineStorePublicationIdOrThrow(): string {
   const id = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
   if (!id) {
@@ -271,8 +282,10 @@ async function createProductActive(opts: {
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
 
+  // 1) Pubblica Negozio online (default o ID passato)
   await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
 
+  // 2) Pubblica anche sul canale "Xmas Admin API v2" se configurato in ENV
   const xmasPubId = getXmasAdminPublicationId();
   if (xmasPubId) {
     await publishProductToPublication({ productId: product.id, publicationId: xmasPubId });
@@ -365,6 +378,7 @@ async function setVariantTracking(params: {
 /* ------ helper: attach featured image al prodotto ------ */
 async function attachFeaturedImage(productId: string, imageUrl: string) {
   try {
+    // Non fa male provare a creare il file (se già presente/URL pubblico, si ignora l'errore)
     await uploadFileFromUrl(imageUrl, { contentType: "IMAGE" });
   } catch {
     // ignore
@@ -415,6 +429,7 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     const variantId = existing.variants?.edges?.[0]?.node?.id;
     if (!variantId) throw new Error("Seat esistente ma senza variante");
 
+    // Assicura tracking ON anche sugli esistenti
     await setVariantTracking({
       productId: existing.id,
       variantIds: [variantId],
@@ -440,6 +455,7 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     descriptionHtml: input.description || undefined,
   });
 
+  // Leggi variante e abilita tracking
   const prodFull = await getProductById(product.id);
   const variantId = prodFull?.variants?.edges?.[0]?.node?.id;
   if (!variantId) throw new Error("Seat creato ma senza variante (post read-by-id)");
@@ -524,6 +540,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       else if (t.includes("handicap")) current["handicap"] = v.id;
     }
 
+    // Tracking OFF/CONTINUE anche per gli esistenti
     const existingVariantIds = Object.values(current).filter(Boolean) as string[];
     if (existingVariantIds.length) {
       await setVariantTracking({
@@ -534,6 +551,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       });
     }
 
+    // se mancano varianti richieste, le aggiungo
     const needed = variantNamesForMode(input.mode).filter((k) => !current[k]);
     if (needed.length && !input.dryRun) {
       const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
@@ -547,6 +565,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       const created = out.productVariantsBulkCreate.productVariants || [];
       const createdMap = mapVariantIdsFromNodes(created);
 
+      // tracking OFF anche sulle nuove
       const newIds = created.map(v => v.id).filter(Boolean) as string[];
       if (newIds.length) {
         await setVariantTracking({
@@ -601,9 +620,10 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     // ⬇️ SOLO i tag scelti in UI + "Bundle" (niente auto-tag col eventHandle)
     tags: Array.from(new Set([...(input.tags || []), "Bundle"])),
     descriptionHtml: input.description || undefined,
-    imageUrl: undefined,
+    imageUrl: undefined, // feature image la settiamo dopo via media
   });
 
+  // attach featured image se presente
   if (input.image) {
     try {
       await attachFeaturedImage(product.id, input.image);
@@ -612,6 +632,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     }
   }
 
+  // varianti richieste
   const needed = variantNamesForMode(input.mode);
   const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
 
@@ -622,9 +643,11 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
   const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
 
+  // varianti create
   const created = out.productVariantsBulkCreate.productVariants || [];
   const ret = mapVariantIdsFromNodes(created);
 
+  // Tracking OFF/CONTINUE sulle nuove varianti
   const createdIds = created.map(v => v.id).filter(Boolean) as string[];
   if (createdIds.length) {
     await setVariantTracking({
@@ -635,6 +658,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     });
   }
 
+  // Se per qualsiasi motivo non arrivano le varianti, fallback: leggi per ID e applica tracking OFF
   if (!ret.unico && !ret.adulto && !ret.bambino && !ret.handicap) {
     const full = await getProductById(product.id);
     const edges = full?.variants?.edges?.map((e: any) => e.node) || [];
@@ -689,7 +713,8 @@ export async function setVariantPrices(
 }
 
 /**
- * Collega un Seat Unit come componente di una variante Bundle.
+ * Collega un Seat Unit come componente di una variante Bundle
+ * e scrive i metafield richiesti dal calendario.
  */
 export async function ensureVariantLeadsToSeat(opts: {
   bundleVariantId: string;
@@ -703,6 +728,29 @@ export async function ensureVariantLeadsToSeat(opts: {
     return { ok: true, created: false, updated: false, qty: componentQuantity };
   }
 
+  // helper: scrivi/aggiorna i due metafield lato variante Bundle
+  async function upsertSeatMetafields() {
+    await adminFetchGQL(M_METAFIELDS_SET, {
+      metafields: [
+        {
+          ownerId: bundleVariantId,
+          namespace: "sinflora",
+          key: "seat_unit",
+          type: "variant_reference",         // riferimento a ProductVariant
+          value: seatVariantId,              // GID della variante SeatUnit
+        },
+        {
+          ownerId: bundleVariantId,
+          namespace: "sinflora",
+          key: "seats_per_ticket",
+          type: "number_integer",            // 1 o 2
+          value: String(componentQuantity),
+        },
+      ],
+    });
+  }
+
+  // 1) Prova a creare la relationship
   const createInput = [
     {
       parentProductVariantId: bundleVariantId,
@@ -719,9 +767,11 @@ export async function ensureVariantLeadsToSeat(opts: {
   const errs = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
   if (!errs.length) {
     await ensureVariantEventuallyVisible(bundleVariantId);
+    await upsertSeatMetafields(); // dopo CREATE
     return { ok: true, created: true, updated: false, qty: componentQuantity };
   }
 
+  // 2) Se esiste già, aggiorna la quantità della relationship
   const updateInput = [
     {
       parentProductVariantId: bundleVariantId,
@@ -738,6 +788,7 @@ export async function ensureVariantLeadsToSeat(opts: {
   const errs2 = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
   if (!errs2.length) {
     await ensureVariantEventuallyVisible(bundleVariantId);
+    await upsertSeatMetafields(); // dopo UPDATE
     return { ok: true, created: false, updated: true, qty: componentQuantity };
   }
 
