@@ -9,6 +9,7 @@ import { useMemo, useState, useEffect, useRef } from "react";
  * - Batching per date contigue con limite eventi/slot per batch
  * - Retry/backoff su 429/5xx (+ Retry-After se presente)
  * - Barra di avanzamento e log compatto
+ * - Toggle "Pubblica subito" (Online Store + Xmas Admin API v2)
  */
 
 const LS_ADMIN_SECRET = "sinflora_admin_secret";
@@ -113,6 +114,9 @@ export default function AdminGeneratorUIV2() {
   const [bundleTitleBase, setBundleTitleBase] = useState(""); // Biglietti (visibili) — (UI only preview)
   const [dryRun, setDryRun] = useState(true);
   const [fridayAsWeekend, setFridayAsWeekend] = useState(false);
+
+  // ✅ Nuovo: pubblicazione immediata
+  const [publishNow, setPublishNow] = useState(true); // default ON (pubblica su entrambi i canali)
 
   // Prezzi — toggle "unico" + tripla (Adulto/Bambino/Handicap)
   const [holidayUnico, setHolidayUnico] = useState(false);
@@ -449,6 +453,7 @@ export default function AdminGeneratorUIV2() {
         const body = {
           source: "manual",
           dryRun,
+          publishNow, // ✅ nuovo flag: pubblicazione immediata ON/OFF per tutti i canali
           eventHandle: productTitleBase,
           startDate: b.start,
           endDate: b.end,
@@ -527,7 +532,7 @@ export default function AdminGeneratorUIV2() {
             />
             <label className="text-sm inline-flex items-center gap-2">
               <input className="size-4" type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} disabled={isRunning} />
-              Dry‑run
+              Dry-run
             </label>
           </div>
         </header>
@@ -778,6 +783,13 @@ export default function AdminGeneratorUIV2() {
                 <div className="sm:col-span-2">
                   <label className="text-sm text-gray-600">Tag (separati da virgola)</label>
                   <input value={tags} onChange={(e) => setTags(e.target.value)} className="w-full mt-1 rounded-xl border px-3 py-2" disabled={isRunning} />
+                </div>
+                {/* ✅ Nuovo: toggle pubblicazione */}
+                <div className="sm:col-span-2">
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={publishNow} onChange={(e) => setPublishNow(e.target.checked)} disabled={isRunning} />
+                    Pubblica subito (Online Store + Xmas Admin API v2)
+                  </label>
                 </div>
               </div>
             </section>
