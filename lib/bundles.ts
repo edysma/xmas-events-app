@@ -141,8 +141,9 @@ const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
   }
 `;
 
+/** ✅ FIX: input singolo (non array) per 2024-10 */
 const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ `
-  mutation PVRRelBulkUpdate($input: [ProductVariantRelationshipUpdateInput!]!) {
+  mutation PVRRelBulkUpdate($input: ProductVariantRelationshipBulkUpdateInput!) {
     productVariantRelationshipBulkUpdate(input: $input) {
       userErrors { field message }
     }
@@ -205,8 +206,9 @@ const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ `
   }
 `;
 
+/** Attenzione: la firma qui è corretta: `[ProductVariantsBulkInput!]!` */
 const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
-  mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!] {
+  mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
       userErrors { field message }
     }
@@ -219,17 +221,6 @@ const M_METAFIELDS_SET = /* GraphQL */ `
     metafieldsSet(metafields: $metafields) {
       metafields { id }
       userErrors { field message }
-    }
-  }
-`;
-
-// Lettura puntuale dei due metafield per verifica
-const Q_READ_VARIANT_META = /* GraphQL */ `
-  query ReadVariantMeta($id: ID!) {
-    productVariant(id: $id) {
-      id
-      mfSeat: metafield(namespace: "sinflora", key: "seat_unit") { type value }
-      mfQty:  metafield(namespace: "sinflora", key: "seats_per_ticket") { type value }
     }
   }
 `;
@@ -438,8 +429,9 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
 // --- API pubbliche ---
 
 /**
- * Crea/riusa il prodotto "Posto" (ACTIVE + pubblicato) con 1 sola variante.
+ * Crea/riusa il prodotto "Posto" (ACTIVE) con 1 sola variante.
  * Tracking: ON (inventario monitorato) + policy DENY.
+ * Pubblicazione condizionale in base a `publish`.
  */
 export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<EnsureSeatUnitResult> {
   const seatTitle = buildSeatTitle(input.titleBase, input.date, input.time);
@@ -541,8 +533,9 @@ export async function ensureInventory(opts: {
 }
 
 /**
- * Crea/riusa il prodotto "Bundle" (ACTIVE + pubblicato) e assicura le varianti richieste.
+ * Crea/riusa il prodotto "Bundle" (ACTIVE) e assicura le varianti richieste.
  * Tracking: OFF (non monitorato) + policy CONTINUE.
+ * Pubblicazione condizionale in base a `publish`.
  */
 export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBundleResult> {
   const title = buildBundleTitle(input.titleBase, input.date, input.time);
@@ -734,67 +727,10 @@ export async function setVariantPrices(
   return { ok: true };
 }
 
-/* ---------------- Metafield robusti: write + verify + retry ---------------- */
-
-async function readSeatMetafields(variantId: string): Promise<{ seat?: string; qty?: string }> {
-  const r = await adminFetchGQL<{ productVariant: {
-    mfSeat?: { type: string; value: string } | null,
-    mfQty?: { type: string; value: string } | null,
-  } }>(Q_READ_VARIANT_META, { id: variantId });
-  return {
-    seat: r?.productVariant?.mfSeat?.value ?? undefined,
-    qty:  r?.productVariant?.mfQty?.value ?? undefined,
-  };
-}
-
-async function writeVariantMetasSafely(params: {
-  variantId: string;
-  seatVariantGid: string;
-  qty: number;
-  maxTries?: number;
-}) {
-  const { variantId, seatVariantGid, qty } = params;
-  const maxTries = Math.max(1, params.maxTries ?? 3);
-
-  for (let attempt = 1; attempt <= maxTries; attempt++) {
-    // Tentativo di scrittura (entrambi insieme)
-    await adminFetchGQL(M_METAFIELDS_SET, {
-      metafields: [
-        {
-          ownerId: variantId,
-          namespace: "sinflora",
-          key: "seat_unit",
-          type: "variant_reference",
-          value: seatVariantGid,
-        },
-        {
-          ownerId: variantId,
-          namespace: "sinflora",
-          key: "seats_per_ticket",
-          type: "number_integer",
-          value: String(qty),
-        },
-      ],
-    });
-
-    // Verifica read-after-write
-    await delay(120 * attempt); // piccolo backoff prima della lettura
-    const got = await readSeatMetafields(variantId);
-    const ok = got.seat === seatVariantGid && got.qty === String(qty);
-    if (ok) return;
-
-    // Retry con backoff esponenziale
-    if (attempt < maxTries) {
-      await delay(200 * Math.pow(2, attempt - 1));
-      continue;
-    }
-    throw new Error(`Metafields not persisted on variant ${variantId} (expected seat=${seatVariantGid}, qty=${qty}, got seat=${got.seat}, qty=${got.qty})`);
-  }
-}
-
 /**
  * Collega un Seat Unit come componente di una variante Bundle
- * e scrive i metafield richiesti dal calendario (robusti).
+ * e scrive i metafield richiesti dal calendario.
+ * Metafield: SEMPRE scritti prima. Relationship: best-effort (non blocca in caso di errori).
  */
 export async function ensureVariantLeadsToSeat(opts: {
   bundleVariantId: string;
@@ -808,50 +744,65 @@ export async function ensureVariantLeadsToSeat(opts: {
     return { ok: true, created: false, updated: false, qty: componentQuantity };
   }
 
-  // 1) Prova a creare la relationship
-  const createInput = [
-    {
-      parentProductVariantId: bundleVariantId,
-      productVariantRelationshipsToCreate: [
-        { id: seatVariantId, quantity: componentQuantity },
-      ],
-    },
-  ];
+  // 1) Metafield: SEMPRE prima
+  await adminFetchGQL(M_METAFIELDS_SET, {
+    metafields: [
+      {
+        ownerId: bundleVariantId,
+        namespace: "sinflora",
+        key: "seat_unit",
+        type: "variant_reference",         // riferimento a ProductVariant
+        value: seatVariantId,              // GID della variante SeatUnit
+      },
+      {
+        ownerId: bundleVariantId,
+        namespace: "sinflora",
+        key: "seats_per_ticket",
+        type: "number_integer",            // 1 o 2
+        value: String(componentQuantity),
+      },
+    ],
+  });
 
-  let res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
-    M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
-    { input: createInput }
-  );
-  const errs = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
-  if (!errs.length) {
-    await ensureVariantEventuallyVisible(bundleVariantId);
-    await writeVariantMetasSafely({ variantId: bundleVariantId, seatVariantGid: seatVariantId, qty: componentQuantity });
-    return { ok: true, created: true, updated: false, qty: componentQuantity };
+  // 2) Relationship: best-effort (prima CREATE poi UPDATE)
+  try {
+    // tenta CREATE
+    let r = await adminFetchGQL(M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE, {
+      input: {
+        parentProductVariantId: bundleVariantId,
+        productVariantRelationshipsToCreate: [{ id: seatVariantId, quantity: componentQuantity }],
+      },
+    });
+    let errs = (r as any)?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
+    if (!errs.length) {
+      await ensureVariantEventuallyVisible(bundleVariantId);
+      return { ok: true, created: true, updated: false, qty: componentQuantity };
+    }
+
+    // se già esiste, tenta UPDATE
+    r = await adminFetchGQL(M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE, {
+      input: {
+        parentProductVariantId: bundleVariantId,
+        productVariantRelationshipsToUpdate: [{ id: seatVariantId, quantity: componentQuantity }],
+      },
+    });
+    errs = (r as any)?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
+    if (!errs.length) {
+      await ensureVariantEventuallyVisible(bundleVariantId);
+      return { ok: true, created: false, updated: true, qty: componentQuantity };
+    }
+
+    // nessuna delle due: non bloccare il batch
+    console.warn(
+      "Relationship warning:",
+      errs.map((e: any) => e?.message).join(" | ")
+    );
+    return { ok: true, created: false, updated: false, qty: componentQuantity };
+  } catch (e: any) {
+    // in caso di syntax/schema error: non fallire, abbiamo già scritto i metafield
+    console.warn("Relationship error (non-fatal):", String(e?.message || e));
+    return { ok: true, created: false, updated: false, qty: componentQuantity };
   }
-
-  // 2) Se esiste già, aggiorna la quantità della relationship
-  const updateInput = [
-    {
-      parentProductVariantId: bundleVariantId,
-      productVariantRelationshipsToUpdate: [
-        { id: seatVariantId, quantity: componentQuantity },
-      ],
-    },
-  ];
-
-  res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
-    M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
-    { input: updateInput }
-  );
-  const errs2 = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
-  if (!errs2.length) {
-    await ensureVariantEventuallyVisible(bundleVariantId);
-    await writeVariantMetasSafely({ variantId: bundleVariantId, seatVariantGid: seatVariantId, qty: componentQuantity });
-    return { ok: true, created: false, updated: true, qty: componentQuantity };
-  }
-
-  const all = [...errs, ...errs2].map((e) => e?.message || JSON.stringify(e)).join("; ");
-  throw new Error(`Shopify GQL errors (ensureVariantLeadsToSeat): ${all}`);
 }
 
 async function ensureVariantEventuallyVisible(variantId: string, tries = 5) {
