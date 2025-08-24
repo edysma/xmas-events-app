@@ -1,4 +1,4 @@
-// lib/shopify-admin.ts
+// lib/shopify-admin.ts (v2 con retry/backoff)
 const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2024-07";
 
 function requiredEnv(name: string): string {
@@ -27,6 +27,29 @@ if (!SHOP_DOMAIN) {
 const ADMIN_BASE = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}`;
 const GQL_URL = `${ADMIN_BASE}/graphql.json`;
 
+// -------------------- Retry/Backoff helpers --------------------
+const MAX_RETRIES = 6;          // tentativi
+const BASE_BACKOFF_MS = 700;    // base backoff
+const MAX_BACKOFF_MS = 12000;   // cappetta backoff
+
+function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
+function jitter() { return Math.random() * 250; }
+function pickBackoff(attempt: number, retryAfterSec?: number | null) {
+  if (retryAfterSec && Number.isFinite(retryAfterSec)) return retryAfterSec * 1000;
+  return Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1)) + jitter();
+}
+function parseRetryAfter(h: Headers): number | null {
+  const v = h.get("Retry-After");
+  if (!v) return null;
+  const sec = parseFloat(v);
+  return Number.isFinite(sec) ? sec : null;
+}
+function isThrottledGqlError(errs?: { message?: string }[] | null): boolean {
+  if (!errs?.length) return false;
+  const txt = errs.map(e => (e?.message || "").toLowerCase()).join(" | ");
+  return /throttl|rate|429|exceed/.test(txt);
+}
+
 // -------------------- Core GQL --------------------
 type GqlResponse<T> = {
   data?: T;
@@ -37,37 +60,68 @@ export async function adminFetchGQL<T = any>(
   query: string,
   variables?: Record<string, any>
 ): Promise<T> {
-  const res = await fetch(GQL_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": ADMIN_ACCESS_TOKEN,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  let lastErr: any = null;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(GQL_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_ACCESS_TOKEN,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
 
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`Shopify GQL HTTP ${res.status}: ${text}`);
+      const text = await res.text();
+
+      // Retry su 429/5xx
+      if (!res.ok) {
+        if ((res.status === 429 || res.status >= 500) && attempt < MAX_RETRIES) {
+          const ra = parseRetryAfter(res.headers);
+          await sleep(pickBackoff(attempt, ra));
+          continue;
+        }
+        throw new Error(`Shopify GQL HTTP ${res.status}: ${text}`);
+      }
+
+      let json: GqlResponse<T>;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        throw new Error(`Invalid JSON from Shopify: ${text.slice(0, 200)}...`);
+      }
+
+      // Alcuni errori di throttle arrivano con 200 + errors[]
+      if (json.errors?.length) {
+        if (isThrottledGqlError(json.errors) && attempt < MAX_RETRIES) {
+          await sleep(pickBackoff(attempt));
+          continue;
+        }
+        const msg = json.errors.map((e) => e.message).join(" | ");
+        throw new Error(`Shopify GQL errors: ${msg}`);
+      }
+
+      if (!json.data) {
+        // può valere la pena riprovare 1-2 volte
+        if (attempt < Math.min(3, MAX_RETRIES)) {
+          await sleep(pickBackoff(attempt));
+          continue;
+        }
+        throw new Error("Shopify GQL: empty data");
+      }
+
+      return json.data;
+    } catch (err) {
+      lastErr = err;
+      // ritenta su errori di rete generici
+      if (attempt < MAX_RETRIES) {
+        await sleep(pickBackoff(attempt));
+        continue;
+      }
+      break;
+    }
   }
-
-  let json: GqlResponse<T>;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`Invalid JSON from Shopify: ${text.slice(0, 200)}...`);
-  }
-
-  if (json.errors?.length) {
-    const msg = json.errors.map((e) => e.message).join(" | ");
-    throw new Error(`Shopify GQL errors: ${msg}`);
-  }
-
-  if (!json.data) {
-    throw new Error("Shopify GQL: empty data");
-  }
-
-  return json.data;
+  throw lastErr ?? new Error("Shopify GQL: unknown error");
 }
 
 // -------------------- Core REST (per Themes) --------------------
@@ -81,22 +135,43 @@ export async function adminFetchREST<T = any>(
     for (const [k, v] of Object.entries(sp)) url.searchParams.set(k, v);
   }
 
-  const res = await fetch(url.toString(), {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": ADMIN_ACCESS_TOKEN,
-      ...(init?.headers || {}),
-    },
-  });
+  let lastErr: any = null;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url.toString(), {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_ACCESS_TOKEN,
+          ...(init?.headers || {}),
+        },
+      });
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Shopify REST ${res.status}: ${text}`);
-  try {
-    return text ? (JSON.parse(text) as T) : ({} as T);
-  } catch {
-    return text as unknown as T;
+      const text = await res.text();
+      if (!res.ok) {
+        if ((res.status === 429 || res.status >= 500) && attempt < MAX_RETRIES) {
+          const ra = parseRetryAfter(res.headers);
+          await sleep(pickBackoff(attempt, ra));
+          continue;
+        }
+        throw new Error(`Shopify REST ${res.status}: ${text}`);
+      }
+
+      try {
+        return text ? (JSON.parse(text) as T) : ({} as T);
+      } catch {
+        return text as unknown as T;
+      }
+    } catch (err) {
+      lastErr = err;
+      if (attempt < MAX_RETRIES) {
+        await sleep(pickBackoff(attempt));
+        continue;
+      }
+      break;
+    }
   }
+  throw lastErr ?? new Error("Shopify REST: unknown error");
 }
 
 // -------------------- Utils --------------------
