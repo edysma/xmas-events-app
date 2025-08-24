@@ -3,10 +3,11 @@
 import { useMemo, useState, useEffect, useRef } from "react";
 
 /**
- * Admin Generator — UI v2
- * - Persistenza Admin Secret in localStorage
- * - Integrazione con /api/admin/generate-bundles (source:"manual")
- * - NESSUNA abbreviazione. File completo.
+ * Admin Generator — UI v2 (Step 4)
+ * - Batching client‑side con retry/backoff
+ * - Barra avanzamento + log compatto + contatori aggregati
+ * - Persistenza admin secret, batchSize e ultimo payload in localStorage
+ * - Nessun cambio a /api/admin/generate-bundles o lib/bundles.ts
  */
 
 const LS_ADMIN_SECRET = "sinflora_admin_secret";
@@ -17,34 +18,21 @@ const LS_LAST_PAYLOAD = "sinflora_last_payload";
 
 type Triple = { adulto?: number; bambino?: number; handicap?: number };
 
-type PriceTierEuro = {
-  holiday?: number | Triple;
-  saturday?: number | Triple;
-  sunday?: number | Triple;
-  friday?: number | Triple;
-  weekday?: {
-    unico?: number;
-    perDay?: {
-      mon?: number | Triple;
-      tue?: number | Triple;
-      wed?: number | Triple;
-      thu?: number | Triple;
-    };
-  };
-};
+// Prezzo per un singolo day-type: oppure "unico" oppure tripla (Adulto/Bambino/Handicap)
+type DayTier = { unico?: number; adulto?: number; bambino?: number; handicap?: number };
 
 type PricesEuro = {
-  holiday?: PriceTierEuro | number | Triple;
-  saturday?: PriceTierEuro | number | Triple;
-  sunday?: PriceTierEuro | number | Triple;
-  friday?: PriceTierEuro | number | Triple;
+  holiday?: DayTier;
+  saturday?: DayTier;
+  sunday?: DayTier;
+  friday?: DayTier;
   weekday?: {
-    unico?: number;
+    unico?: number; // generico per Lun–Gio
     perDay?: {
-      mon?: PriceTierEuro | number | Triple;
-      tue?: PriceTierEuro | number | Triple;
-      wed?: PriceTierEuro | number | Triple;
-      thu?: PriceTierEuro | number | Triple;
+      mon?: DayTier;
+      tue?: DayTier;
+      wed?: DayTier;
+      thu?: DayTier;
     };
   };
 };
@@ -71,33 +59,45 @@ export default function AdminGeneratorUIV2() {
   // -----------------------------
   // Stato principale
   // -----------------------------
-  const [adminSecret, setAdminSecret] = useState(""); // Admin Secret (persistente)
+  const [adminSecret, setAdminSecret] = useState("");
 
   const [dateStart, setDateStart] = useState("");
   const [dateEnd, setDateEnd] = useState("");
   const [excluded, setExcluded] = useState<string[]>([]);
   const [timesText, setTimesText] = useState("");
 
+  // Base titoli/capienza
   const [productTitleBase, setProductTitleBase] = useState(""); // Posti (nascosti) — usato come eventHandle lato API
   const [capacityPerSlot, setCapacityPerSlot] = useState<number>(0);
-
   const [bundleTitleBase, setBundleTitleBase] = useState(""); // Biglietti (visibili)
+
+  // Opzioni
   const [dryRun, setDryRun] = useState(true);
   const [fridayAsWeekend, setFridayAsWeekend] = useState(false);
 
+  // Batching & stato esecuzione
   const [batchSize, setBatchSize] = useState<number>(25);
   const [isRunning, setIsRunning] = useState(false);
   const [aborted, setAborted] = useState(false);
   const abortRef = useRef(false);
 
   const [progress, setProgress] = useState<{ done: number; total: number; batchIndex: number; batchesTotal: number }>({
-    done: 0, total: 0, batchIndex: 0, batchesTotal: 0
+    done: 0,
+    total: 0,
+    batchIndex: 0,
+    batchesTotal: 0,
   });
   const [logLines, setLogLines] = useState<string[]>([]);
   const [aggCounts, setAgg] = useState<{ seatsCreated: number; bundlesCreated: number; variantsCreated: number }>(
     { seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 }
   );
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [modalMsg, setModalMsg] = useState<string | null>(null);
+
+  // Metadati prodotto opzionali
+  const [templateSuffix, setTemplateSuffix] = useState("");
+  const [tags, setTags] = useState<string>("");
+  const [imageUrl, setImageUrl] = useState<string>("");
+  const [desc, setDesc] = useState<string>("");
 
   // Prezzi — toggle "unico" + tripla (Adulto/Bambino/Handicap)
   const [holidayUnico, setHolidayUnico] = useState(false);
@@ -135,48 +135,29 @@ export default function AdminGeneratorUIV2() {
   const [ferThuUnicoPrice, setFerThuUnicoPrice] = useState<number>(0);
   const [ferThuTriple, setFerThuTriple] = useState<Triple>({});
 
-  // Persistenza admin secret
+  // Persistenza admin secret / batchSize
   useEffect(() => {
-    try {
-      const v = window.localStorage.getItem(LS_ADMIN_SECRET);
-      if (v) setAdminSecret(v);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(LS_ADMIN_SECRET, adminSecret ?? "");
-    } catch {
-      // ignore
-    }
-  }, [adminSecret]);
-
-  // Persistenza BatchSize
-  useEffect(() => {
+    try { const v = window.localStorage.getItem(LS_ADMIN_SECRET); if (v) setAdminSecret(v); } catch {}
     try {
       const raw = window.localStorage.getItem(LS_BATCH_SIZE);
       const v = raw ? parseInt(raw, 10) : NaN;
       if (!Number.isNaN(v) && v > 0) setBatchSize(v);
     } catch {}
   }, []);
-  useEffect(() => {
-    try { window.localStorage.setItem(LS_BATCH_SIZE, String(batchSize || 25)); } catch {}
-  }, [batchSize]);
+  useEffect(() => { try { window.localStorage.setItem(LS_ADMIN_SECRET, adminSecret ?? ""); } catch {} }, [adminSecret]);
+  useEffect(() => { try { window.localStorage.setItem(LS_BATCH_SIZE, String(batchSize || 25)); } catch {} }, [batchSize]);
 
   // Sync abort ref
   useEffect(() => { abortRef.current = aborted; }, [aborted]);
 
-  // -----------------------------
-  // Helpers date/orari
-  // -----------------------------
+  // ----------------------------- Helpers date/orari -----------------------------
+
   // Weekday helper Europe/Rome (1=Mon..7=Sun)
   function weekdayRome(date: string): number {
     const name = new Intl.DateTimeFormat("it-IT", { weekday: "short", timeZone: "Europe/Rome" })
       .format(new Date(date + "T12:00:00Z"))
       .toLowerCase();
-    const map: Record<string, number> = { lun:1, mar:2, mer:3, gio:4, ven:5, sab:6, dom:7 };
+    const map: Record<string, number> = { lun: 1, mar: 2, mer: 3, gio: 4, ven: 5, sab: 6, dom: 7 };
     return map[name] ?? 0;
   }
 
@@ -193,6 +174,7 @@ export default function AdminGeneratorUIV2() {
     }
     return out;
   }
+
   function parseTimesWithValidation(text: string): { valid: string[]; invalid: string[]; duplicatesRemoved: number } {
     const raw = (text || "")
       .split(/[\n,;\s]+/)
@@ -233,50 +215,36 @@ export default function AdminGeneratorUIV2() {
     [effectiveDates.length, timesInfo.valid.length]
   );
 
-  // Sample carrello
+  // Anteprima
   const sampleDate = effectiveDates[0] || "";
   const sampleTime = timesInfo.valid[0] || "";
   function isUnicoForSample(sampleDate: string) {
-    // Giornata campione: preferisci holiday > sat > sun > fri > weekday
     const w = new Date(sampleDate + "T12:00:00Z").getUTCDay(); // 0=Dom ... 6=Sab
     if (holidayUnico) return true;
     if (w === 6) return satUnico;
     if (w === 0) return sunUnico;
-    if (w === 5) {
-      if (fridayAsWeekend) return friUnico; // venerdì come weekend
-      return ferUnico; // generale Lun–Gio
-    }
+    if (w === 5) return fridayAsWeekend ? friUnico : ferUnico;
     return false;
   }
-  const sampleTitle =
-    bundleTitleBase && sampleDate && sampleTime
-      ? `${bundleTitleBase} — ${sampleDate.split("-").reverse().join("/")} ${sampleTime}`
-      : "(compila titolo, date e orari)";
   const sampleVariant = isUnicoForSample(sampleDate) ? "Biglietto unico" : "Adulto / Bambino / Handicap";
 
-  // UI: toggle esclusione date
-  function toggleExclude(d: string) {
-    setExcluded((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
-  }
+  // Esclusione date toggle
+  function toggleExclude(d: string) { setExcluded((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d])); }
 
-  // -----------------------------
-  // Build prezzi per API body
-  // -----------------------------
-  function toTier(unico: boolean, unicoPrice: number, triple: Triple): PriceTierEuro | undefined {
+  // ----------------------------- Build prezzi per API body -----------------------------
+  function round2(v: number) { return Math.round((v + Number.EPSILON) * 100) / 100; }
+
+  function toTier(unico: boolean, unicoPrice: number, triple: Triple): DayTier | undefined {
     if (unico) {
       if (typeof unicoPrice === "number" && unicoPrice > 0) return { unico: round2(unicoPrice) };
       return undefined;
     }
-    const p: PriceTierEuro = {};
-    if (typeof triple?.adulto === "number" && triple.adulto > 0) p.adulto = round2(triple.adulto);
-    if (typeof triple?.bambino === "number" && triple.bambino > 0) p.bambino = round2(triple.bambino);
-    if (typeof triple?.handicap === "number" && triple.handicap > 0) p.handicap = round2(triple.handicap);
-    if (!("adulto" in p) && !("bambino" in p) && !("handicap" in p)) return undefined;
+    const p: DayTier = {};
+    if (typeof triple?.adulto === "number" && triple.adulto! > 0) p.adulto = round2(triple.adulto!);
+    if (typeof triple?.bambino === "number" && triple.bambino! > 0) p.bambino = round2(triple.bambino!);
+    if (typeof triple?.handicap === "number" && triple.handicap! > 0) p.handicap = round2(triple.handicap!);
+    if (!p.unico && !p.adulto && !p.bambino && !p.handicap) return undefined;
     return p;
-  }
-
-  function round2(v: number) {
-    return Math.round((v + Number.EPSILON) * 100) / 100;
   }
 
   function buildPrices(): PricesEuro {
@@ -294,51 +262,37 @@ export default function AdminGeneratorUIV2() {
     const fri = toTier(friUnico, friUnicoPrice, friTriple);
     if (fri) prices.friday = fri;
 
-    // Feriali generali + per-day Lunedì–Giovedì
+    // Feriali generali (solo unico) + per-day Mon–Thu (unico o tripla)
     const fer = toTier(ferUnico, ferUnicoPrice, {});
-    if (fer) {
-      prices.weekday = { unico: (fer as any).unico } as any;
+    if (fer?.unico) {
+      prices.weekday = { unico: fer.unico };
     }
 
-    // per-day Mon–Thu
-    const perDay: any = {};
-    const mon = toTier(ferMonUnico, ferMonUnicoPrice, ferMonTriple);
-    if (mon) perDay.mon = mon;
-    const tue = toTier(ferTueUnico, ferTueUnicoPrice, ferTueTriple);
-    if (tue) perDay.tue = tue;
-    const wed = toTier(ferWedUnico, ferWedUnicoPrice, ferWedTriple);
-    if (wed) perDay.wed = wed;
-    const thu = toTier(ferThuUnico, ferThuUnicoPrice, ferThuTriple);
-    if (thu) perDay.thu = thu;
+    const perDay: Record<string, DayTier> = {};
+    const mon = toTier(ferMonUnico, ferMonUnicoPrice, ferMonTriple); if (mon) perDay.mon = mon;
+    const tue = toTier(ferTueUnico, ferTueUnicoPrice, ferTueTriple); if (tue) perDay.tue = tue;
+    const wed = toTier(ferWedUnico, ferWedUnicoPrice, ferWedTriple); if (wed) perDay.wed = wed;
+    const thu = toTier(ferThuUnico, ferThuUnicoPrice, ferThuTriple); if (thu) perDay.thu = thu;
 
     if (Object.keys(perDay).length > 0) {
-      if (!prices.weekday) prices.weekday = {} as any;
-      (prices.weekday as any).perDay = perDay;
+      if (!prices.weekday) prices.weekday = {};
+      prices.weekday.perDay = perDay as any;
     }
 
     return prices;
   }
 
-  // Slots separati per weekday/weekend
-  const weekdaySlots = useMemo(() => {
-    // Lunedì-Giovedì + (Venerdì se non weekend)
-    return timesInfo.valid;
-  }, [timesInfo.valid]);
+  // Slot lists (per ora identiche; la distinzione weekend/feriali è determinata al run dai festivi)
+  const weekdaySlots = useMemo(() => timesInfo.valid, [timesInfo.valid]);
+  const weekendSlots = useMemo(() => timesInfo.valid, [timesInfo.valid]);
 
-  const weekendSlots = useMemo(() => {
-    // Sabato/Domenica/Festivi + (Venerdì se fridayAsWeekend)
-    return timesInfo.valid;
-  }, [timesInfo.valid]);
-
-  // -----------------------------
-  // Call API generate-bundles (manual) — batching + retry/backoff
-  // -----------------------------
+  // ----------------------------- Orchestratore: batching + retry/backoff -----------------------------
   async function handleCreateBundles() {
     if (!canRun || isRunning) return;
     setIsRunning(true);
     setAborted(false);
     abortRef.current = false;
-    setErrorMsg(null);
+    setModalMsg(null);
     setLogLines([]);
     setAgg({ seatsCreated: 0, bundlesCreated: 0, variantsCreated: 0 });
 
@@ -348,7 +302,7 @@ export default function AdminGeneratorUIV2() {
       const bodyBase = {
         source: "manual" as const,
         dryRun,
-        eventHandle: productTitleBase, // lato API usiamo eventHandle come base
+        eventHandle: productTitleBase,
         startDate: dateStart,
         endDate: dateEnd,
         weekdaySlots,
@@ -359,14 +313,12 @@ export default function AdminGeneratorUIV2() {
         templateSuffix: templateSuffix || undefined,
         imageUrl: imageUrl || undefined,
         description: desc || undefined,
-        tags: tags
-          ? tags.split(",").map((t) => t.trim()).filter(Boolean)
-          : undefined,
+        tags: tags && tags.trim() ? tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
       };
 
       try { window.localStorage.setItem(LS_LAST_PAYLOAD, JSON.stringify(bodyBase)); } catch {}
 
-      // Fetch public holidays to match server day-type logic
+      // Festivi (per coerenza con day-type server)
       const holidaysSet: Set<string> = new Set(
         await (async () => {
           try {
@@ -378,8 +330,8 @@ export default function AdminGeneratorUIV2() {
         })()
       );
 
-      // Build date list
-      const dates = listDatesBetween(dateStart, dateEnd);
+      // Date effettive (con esclusioni)
+      const dates = effectiveDates;
 
       const slotCountForDate = (d: string) => {
         const w = weekdayRome(d);
@@ -395,7 +347,7 @@ export default function AdminGeneratorUIV2() {
       const total = dates.reduce((sum, d) => sum + slotCountForDate(d), 0);
       setProgress({ done: 0, total, batchIndex: 0, batchesTotal: 0 });
 
-      // Group in batches of <= batchSize slots with consecutive dates
+      // Raggruppa in lotti (range di date consecutive) con somma slot ≤ batchSize
       const target = Math.max(1, Number(batchSize) || 25);
       const batches: Array<{ start: string; end: string; slots: number }> = [];
       let i = 0;
@@ -406,7 +358,7 @@ export default function AdminGeneratorUIV2() {
         while (j < dates.length) {
           const add = slotCountForDate(dates[j]);
           if (count > 0 && count + add > target) break;
-          if (count === 0 && add > target) { // single heavy day
+          if (count === 0 && add > target) { // giorno molto carico
             count = add; j++; break;
           }
           count += add; j++;
@@ -468,35 +420,33 @@ export default function AdminGeneratorUIV2() {
               }
             }
 
-            // Success
+            // Successo
             success = true;
             const s: any = data.summary || {};
             agg.seatsCreated += Number(s.seatsCreated || 0);
             agg.bundlesCreated += Number(s.bundlesCreated || 0);
             agg.variantsCreated += Number(s.variantsCreated || 0);
+            setAgg({ ...agg });
 
             processed += b.slots;
             setProgress({ done: Math.min(processed, total), total, batchIndex: batchIdx, batchesTotal: batches.length });
-            appendLog(`OK: ${b.start} → ${b.end} — creati S:${s.seatsCreated||0} B:${s.bundlesCreated||0} V:${s.variantsCreated||0}`);
+            appendLog(`OK: ${b.start} → ${b.end} — creati S:${s.seatsCreated || 0} B:${s.bundlesCreated || 0} V:${s.variantsCreated || 0}`);
           } catch (e: any) {
             lastErr = e?.message || String(e);
             if (attempt < 4) {
-              appendLog(`Errore: ${lastErr} — nuovo tentativo tra ${delayMs/1000}s`);
+              appendLog(`Errore: ${lastErr} — nuovo tentativo tra ${delayMs / 1000}s`);
               await sleep(delayMs);
             }
           }
         }
 
         if (!success) {
-          setAgg(agg);
           setIsRunning(false);
-          setErrorMsg(`Batch ${batchIdx} fallito: ${lastErr || "sconosciuto"}`);
-          setModalMsg(`Errore: batch ${batchIdx} — ${lastErr || "sconosciuto"}`);
+          setModalMsg(`Batch ${batchIdx} fallito: ${lastErr || "sconosciuto"}`);
           return;
         }
       }
 
-      setAgg(agg);
       const pct = total ? Math.round((Math.min(processed, total) / total) * 100) : 0;
       setModalMsg(abortRef.current
         ? `Operazione interrotta. Completato ~${pct}%`
@@ -510,18 +460,7 @@ export default function AdminGeneratorUIV2() {
     }
   }
 
-  // -----------------------------
-  // TEST automatici (console) per parser orari
-  // -----------------------------
-  useEffect(() => {
-    const ok = (name: string, cond: boolean) => console.assert(cond, `Test fallito: ${name}`);
-    const t1 = parseTimesWithValidation("");
-    ok("vuoto", t1.valid.length === 0 && t1.invalid.length >= 0);
-  }, []);
-
-  // -----------------------------
-  // UI
-  // -----------------------------
+  // ----------------------------- UI -----------------------------
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-5xl mx-auto p-5 space-y-6">
@@ -553,7 +492,7 @@ export default function AdminGeneratorUIV2() {
               </div>
             </div>
 
-            {/* Calendario semplice (grid di date) */}
+            {/* Calendario semplice */}
             <div>
               <h4 className="font-medium mb-1">Escludi date</h4>
               <div className="grid grid-cols-7 gap-2 max-h-40 overflow-auto">
@@ -581,7 +520,7 @@ export default function AdminGeneratorUIV2() {
               <textarea
                 value={timesText}
                 onChange={(e) => setTimesText(e.target.value)}
-                placeholder="Es. 10:00\n11:30\n15:00"
+                placeholder={"Es. 10:00\n11:30\n15:00"}
                 className="w-full h-28 rounded-xl border p-3"
               />
               {timesInfo.invalid.length > 0 && (
@@ -638,7 +577,7 @@ export default function AdminGeneratorUIV2() {
               </label>
             </div>
 
-            {/* Prezzi sintetici (holiday/sat/sun/fri/weekday + per-day) */}
+            {/* Prezzi sintetici */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <DayCard title="Festivi">
                 <SectionPricesInner
@@ -755,7 +694,7 @@ export default function AdminGeneratorUIV2() {
                   <label className="text-sm text-gray-600">Tag (separati da virgola)</label>
                   <input
                     type="text"
-                    value={tags || ""}
+                    value={tags}
                     onChange={(e) => setTags(e.target.value)}
                     className="w-full rounded-xl border px-3 py-2"
                   />
@@ -764,7 +703,7 @@ export default function AdminGeneratorUIV2() {
                   <label className="text-sm text-gray-600">Immagine URL (opzionale)</label>
                   <input
                     type="url"
-                    value={imageUrl || ""}
+                    value={imageUrl}
                     onChange={(e) => setImageUrl(e.target.value)}
                     className="w-full rounded-xl border px-3 py-2"
                   />
@@ -773,7 +712,7 @@ export default function AdminGeneratorUIV2() {
               <div>
                 <label className="text-sm text-gray-600">Descrizione (facoltativa)</label>
                 <textarea
-                  value={desc || ""}
+                  value={desc}
                   onChange={(e) => setDesc(e.target.value)}
                   className="w-full h-20 rounded-xl border p-3"
                 />
@@ -790,13 +729,7 @@ export default function AdminGeneratorUIV2() {
                   {isRunning ? "In corso..." : "Crea posti + biglietti"}
                 </button>
                 {isRunning && (
-                  <button
-                    type="button"
-                    onClick={() => setAborted(true)}
-                    className="rounded-xl border px-3 py-2"
-                  >
-                    Stop
-                  </button>
+                  <button type="button" onClick={() => setAborted(true)} className="rounded-xl border px-3 py-2">Stop</button>
                 )}
               </div>
               <div className="flex items-center gap-3">
@@ -855,12 +788,7 @@ export default function AdminGeneratorUIV2() {
             <div className="bg-white rounded-2xl shadow-lg p-5 max-w-lg w-full space-y-3">
               <div className="text-sm whitespace-pre-wrap">{modalMsg}</div>
               <div className="text-right">
-                <button
-                  onClick={() => setModalMsg(null)}
-                  className="rounded-xl border px-3 py-2"
-                >
-                  OK
-                </button>
+                <button onClick={() => setModalMsg(null)} className="rounded-xl border px-3 py-2">OK</button>
               </div>
             </div>
           </div>
@@ -928,16 +856,3 @@ function Num({ label, value, onChange }: { label: string; value?: number; onChan
     </div>
   );
 }
-
-/* ----------------------------- State aggiuntivi per metadati ----------------------------- */
-let templateSuffix = "";
-let tags: string | undefined = undefined;
-let imageUrl: string | undefined = undefined;
-let desc: string | undefined = undefined;
-let modalMsg: string | null = null;
-
-function setTemplateSuffix(v: string) { templateSuffix = v; }
-function setTags(v: string) { tags = v; }
-function setImageUrl(v: string) { imageUrl = v; }
-function setDesc(v: string) { desc = v; }
-function setModalMsg(v: string | null) { modalMsg = v; }
