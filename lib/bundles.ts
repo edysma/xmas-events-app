@@ -223,6 +223,17 @@ const M_METAFIELDS_SET = /* GraphQL */ `
   }
 `;
 
+// Lettura puntuale dei due metafield per verifica
+const Q_READ_VARIANT_META = /* GraphQL */ `
+  query ReadVariantMeta($id: ID!) {
+    productVariant(id: $id) {
+      id
+      mfSeat: metafield(namespace: "sinflora", key: "seat_unit") { type value }
+      mfQty:  metafield(namespace: "sinflora", key: "seats_per_ticket") { type value }
+    }
+  }
+`;
+
 // --- Funzioni di supporto interne ---
 async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   const parts = [`title:"${title.replace(/"/g, '\\"')}"`];
@@ -723,9 +734,67 @@ export async function setVariantPrices(
   return { ok: true };
 }
 
+/* ---------------- Metafield robusti: write + verify + retry ---------------- */
+
+async function readSeatMetafields(variantId: string): Promise<{ seat?: string; qty?: string }> {
+  const r = await adminFetchGQL<{ productVariant: {
+    mfSeat?: { type: string; value: string } | null,
+    mfQty?: { type: string; value: string } | null,
+  } }>(Q_READ_VARIANT_META, { id: variantId });
+  return {
+    seat: r?.productVariant?.mfSeat?.value ?? undefined,
+    qty:  r?.productVariant?.mfQty?.value ?? undefined,
+  };
+}
+
+async function writeVariantMetasSafely(params: {
+  variantId: string;
+  seatVariantGid: string;
+  qty: number;
+  maxTries?: number;
+}) {
+  const { variantId, seatVariantGid, qty } = params;
+  const maxTries = Math.max(1, params.maxTries ?? 3);
+
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    // Tentativo di scrittura (entrambi insieme)
+    await adminFetchGQL(M_METAFIELDS_SET, {
+      metafields: [
+        {
+          ownerId: variantId,
+          namespace: "sinflora",
+          key: "seat_unit",
+          type: "variant_reference",
+          value: seatVariantGid,
+        },
+        {
+          ownerId: variantId,
+          namespace: "sinflora",
+          key: "seats_per_ticket",
+          type: "number_integer",
+          value: String(qty),
+        },
+      ],
+    });
+
+    // Verifica read-after-write
+    await delay(120 * attempt); // piccolo backoff prima della lettura
+    const got = await readSeatMetafields(variantId);
+    const ok = got.seat === seatVariantGid && got.qty === String(qty);
+    if (ok) return;
+
+    // Retry con backoff esponenziale
+    if (attempt < maxTries) {
+      await delay(200 * Math.pow(2, attempt - 1));
+      continue;
+    }
+    throw new Error(`Metafields not persisted on variant ${variantId} (expected seat=${seatVariantGid}, qty=${qty}, got seat=${got.seat}, qty=${got.qty})`);
+  }
+}
+
 /**
  * Collega un Seat Unit come componente di una variante Bundle
- * e scrive i metafield richiesti dal calendario.
+ * e scrive i metafield richiesti dal calendario (robusti).
  */
 export async function ensureVariantLeadsToSeat(opts: {
   bundleVariantId: string;
@@ -737,28 +806,6 @@ export async function ensureVariantLeadsToSeat(opts: {
 
   if (dryRun) {
     return { ok: true, created: false, updated: false, qty: componentQuantity };
-  }
-
-  // helper: scrivi/aggiorna i due metafield lato variante Bundle
-  async function upsertSeatMetafields() {
-    await adminFetchGQL(M_METAFIELDS_SET, {
-      metafields: [
-        {
-          ownerId: bundleVariantId,
-          namespace: "sinflora",
-          key: "seat_unit",
-          type: "variant_reference",         // riferimento a ProductVariant
-          value: seatVariantId,              // GID della variante SeatUnit
-        },
-        {
-          ownerId: bundleVariantId,
-          namespace: "sinflora",
-          key: "seats_per_ticket",
-          type: "number_integer",            // 1 o 2
-          value: String(componentQuantity),
-        },
-      ],
-    });
   }
 
   // 1) Prova a creare la relationship
@@ -778,7 +825,7 @@ export async function ensureVariantLeadsToSeat(opts: {
   const errs = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
   if (!errs.length) {
     await ensureVariantEventuallyVisible(bundleVariantId);
-    await upsertSeatMetafields(); // dopo CREATE
+    await writeVariantMetasSafely({ variantId: bundleVariantId, seatVariantGid: seatVariantId, qty: componentQuantity });
     return { ok: true, created: true, updated: false, qty: componentQuantity };
   }
 
@@ -799,7 +846,7 @@ export async function ensureVariantLeadsToSeat(opts: {
   const errs2 = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
   if (!errs2.length) {
     await ensureVariantEventuallyVisible(bundleVariantId);
-    await upsertSeatMetafields(); // dopo UPDATE
+    await writeVariantMetasSafely({ variantId: bundleVariantId, seatVariantGid: seatVariantId, qty: componentQuantity });
     return { ok: true, created: false, updated: true, qty: componentQuantity };
   }
 
