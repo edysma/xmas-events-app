@@ -70,7 +70,10 @@ const MUT_VARIANTS_BULK_CREATE = /* GraphQL */ `
 const MUT_INVENTORY_ACTIVATE = /* GraphQL */ `
   mutation InventoryActivate($inventoryItemId: ID!, $locationId: ID!, $available: Int!) {
     inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId, available: $available) {
-      inventoryLevel { id available }
+      inventoryLevel {
+        id
+        quantities(names: ["available"]) { name quantity }
+      }
       userErrors { field message }
     }
   }
