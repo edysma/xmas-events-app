@@ -1,6 +1,7 @@
 // lib/bundles.ts
 // Helpers per creare/riusare Posti (Seat Unit) e Biglietti (Bundle) e collegare componenti.
 // Allineato a Admin GraphQL 2024-07/2024-10
+
 import {
   adminFetchGQL,
   getDefaultLocationId,
@@ -11,26 +12,30 @@ import {
 // --- Tipi locali ---
 export type DayType = "weekday" | "friday" | "saturday" | "sunday" | "holiday";
 export type TicketMode = "unico" | "triple";
+
 export type PriceTierEuro = {
   unico?: number;
   adulto?: number;
   bambino?: number;
   handicap?: number;
 };
+
 type EnsureSeatUnitInput = {
   titleBase: string; // es: "Seat Unit · Viaggio Incantato"
-  date: string; // YYYY-MM-DD
-  time: string; // HH:mm
+  date: string;      // YYYY-MM-DD
+  time: string;      // HH:mm
   templateSuffix?: string;
   tags?: string[];
   description?: string | null;
   dryRun?: boolean;
 };
+
 type EnsureSeatUnitResult = {
   productId: string;
   variantId: string;
   created: boolean; // true se il Seat è stato creato ora
 };
+
 // attenzione: chi chiama può passare "priceTier€" nel payload runtime.
 type EnsureBundleInput = {
   eventHandle: string;
@@ -46,15 +51,17 @@ type EnsureBundleInput = {
   description?: string | null;
   dryRun?: boolean;
 };
+
 type EnsureBundleResult = {
   productId: string;
   variantMap: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined>;
-  createdProduct: boolean; // true se il prodotto Bundle è stato creato ora
-  createdVariants: number; // quante varianti sono state create in questo giro
+  createdProduct: boolean;   // true se il prodotto Bundle è stato creato ora
+  createdVariants: number;   // quante varianti sono state create in questo giro
 };
 
 // --- Utils ---
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 function buildSeatTitle(base: string, date: string, time: string) {
   return `${base} — ${date} ${time}`;
 }
@@ -75,44 +82,28 @@ const Q_FIND_PRODUCT_BY_TITLE = /* GraphQL */ `
           templateSuffix
           tags
           variants(first: 20) {
-            edges {
-              node {
-                id
-                title
-                selectedOptions { name value }
-                inventoryItem { id }
-              }
-            }
+            edges { node { id title selectedOptions { name value } inventoryItem { id } } }
           }
         }
       }
     }
   }
 `;
+
 const M_PRODUCT_CREATE = /* GraphQL */ `
   mutation ProductCreate($input: ProductInput!) {
     productCreate(input: $input) {
       product {
-        id
-        title
-        status
-        templateSuffix
-        tags
+        id title status templateSuffix tags
         variants(first: 20) {
-          edges {
-            node {
-              id
-              title
-              selectedOptions { name value }
-              inventoryItem { id }
-            }
-          }
+          edges { node { id title selectedOptions { name value } inventoryItem { id } } }
         }
       }
       userErrors { field message }
     }
   }
 `;
+
 const Q_PRODUCT_BY_ID = /* GraphQL */ `
   query ProductById($id: ID!) {
     product(id: $id) {
@@ -122,18 +113,12 @@ const Q_PRODUCT_BY_ID = /* GraphQL */ `
       templateSuffix
       tags
       variants(first: 20) {
-        edges {
-          node {
-            id
-            title
-            selectedOptions { name value }
-            inventoryItem { id }
-          }
-        }
+        edges { node { id title selectedOptions { name value } inventoryItem { id } } }
       }
     }
   }
 `;
+
 const M_PRODUCT_UPDATE = /* GraphQL */ `
   mutation ProductUpdate($input: ProductInput!) {
     productUpdate(input: $input) {
@@ -142,18 +127,16 @@ const M_PRODUCT_UPDATE = /* GraphQL */ `
     }
   }
 `;
+
 const M_PRODUCT_VARIANTS_BULK_CREATE = /* GraphQL */ `
   mutation PVBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy!) {
     productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
-      productVariants {
-        id
-        title
-        selectedOptions { name value }
-      }
+      productVariants { id title selectedOptions { name value } }
       userErrors { field message }
     }
   }
 `;
+
 const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ `
   mutation PVRRelBulkUpdate($input: [ProductVariantRelationshipUpdateInput!]!) {
     productVariantRelationshipBulkUpdate(input: $input) {
@@ -161,6 +144,7 @@ const M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE = /* GraphQL */ `
     }
   }
 `;
+
 // Inventario: payload corretto (input = InventorySetQuantitiesInput!)
 const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
   mutation InvSet($input: InventorySetQuantitiesInput!) {
@@ -169,23 +153,28 @@ const M_INVENTORY_SET_QUANTITIES = /* GraphQL */ `
         createdAt
         reason
         referenceDocumentUri
-        changes { name delta quantityAfterChange }
+        changes {
+          name
+          delta
+          quantityAfterChange
+        }
       }
       userErrors { field message }
     }
   }
 `;
+
 /* ---------- MEDIA: attach featured image ---------- */
+
 const M_PRODUCT_CREATE_MEDIA = /* GraphQL */ `
   mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
     productCreateMedia(productId: $productId, media: $media) {
-      media {
-        ... on MediaImage { id image { url } }
-      }
+      media { ... on MediaImage { id image { url } } }
       mediaUserErrors { field message }
     }
   }
 `;
+
 const M_PRODUCT_SET_FEATURED = /* GraphQL */ `
   mutation ProductSetFeatured($productId: ID!, $mediaId: ID!) {
     productSetFeaturedMedia(productId: $productId, mediaId: $mediaId) {
@@ -194,15 +183,15 @@ const M_PRODUCT_SET_FEATURED = /* GraphQL */ `
     }
   }
 `;
+
 /* ---------- Tracking scorte (PATCH) ---------- */
+
 const Q_VARIANT_ITEM = /* GraphQL */ `
   query VariantItem($id: ID!) {
-    productVariant(id: $id) {
-      id
-      inventoryItem { id }
-    }
+    productVariant(id: $id) { id inventoryItem { id } }
   }
 `;
+
 const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ `
   mutation InvItemUpdate($id: ID!, $input: InventoryItemInput!) {
     inventoryItemUpdate(id: $id, input: $input) {
@@ -211,6 +200,7 @@ const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ `
     }
   }
 `;
+
 const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
   mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -218,6 +208,7 @@ const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
     }
   }
 `;
+
 // Scrive/aggiorna metafield su vari owner (qui: varianti)
 const M_METAFIELDS_SET = /* GraphQL */ `
   mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
@@ -242,6 +233,7 @@ async function findProductByExactTitle(title: string, mustHaveTag?: string) {
   }
   return node;
 }
+
 // (tenuto per completezza, al momento non forzato qui)
 function getOnlineStorePublicationIdOrThrow(): string {
   const id = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
@@ -255,6 +247,7 @@ function getOnlineStorePublicationIdOrThrow(): string {
 function getXmasAdminPublicationId(): string | undefined {
   return process.env.SHOPIFY_XMAS_ADMIN_PUBLICATION_ID || process.env.XMAS_ADMIN_PUBLICATION_ID || undefined;
 }
+
 async function publishProductToOnlineStore(productId: string, _pubId?: string) {
   if (_pubId) {
     await publishProductToPublication({ productId, publicationId: _pubId });
@@ -262,6 +255,7 @@ async function publishProductToOnlineStore(productId: string, _pubId?: string) {
     await publishProductToPublication({ productId });
   }
 }
+
 async function createProductActive(opts: {
   title: string;
   templateSuffix?: string;
@@ -287,34 +281,38 @@ async function createProductActive(opts: {
   if (errs.length) throw new Error(`productCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
+
   // 1) Pubblica Negozio online (default o ID passato)
   await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
+
   // 2) Pubblica anche sul canale "Xmas Admin API v2" se configurato in ENV
   const xmasPubId = getXmasAdminPublicationId();
   if (xmasPubId) {
     await publishProductToPublication({ productId: product.id, publicationId: xmasPubId });
   }
+
   return product;
 }
+
 async function getProductById(id: string) {
   const data = await adminFetchGQL<{ product: any }>(Q_PRODUCT_BY_ID, { id });
   return data?.product;
 }
+
 function variantNamesForMode(mode: TicketMode): Array<"unico" | "adulto" | "bambino" | "handicap"> {
   return mode === "unico" ? ["unico"] : ["adulto", "bambino", "handicap"];
 }
+
 function labelForVariant(k: "unico" | "adulto" | "bambino" | "handicap") {
   if (k === "unico") return "Biglietto unico";
   if (k === "adulto") return "Adulto";
   if (k === "bambino") return "Bambino";
   return "Handicap";
 }
+
 function mapVariantIdsFromNodes(nodes: any[]): Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> {
   const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
-    unico: undefined,
-    adulto: undefined,
-    bambino: undefined,
-    handicap: undefined,
+    unico: undefined, adulto: undefined, bambino: undefined, handicap: undefined,
   };
   for (const v of nodes) {
     const t = (v.selectedOptions?.[0]?.value || v.title || "").toLowerCase();
@@ -327,6 +325,7 @@ function mapVariantIdsFromNodes(nodes: any[]): Record<"unico" | "adulto" | "bamb
 }
 
 /* ------ helpers: inventory / featured image ------ */
+
 async function getInventoryItemId(variantId: string): Promise<string> {
   const r = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } }>(
     Q_VARIANT_ITEM,
@@ -336,32 +335,34 @@ async function getInventoryItemId(variantId: string): Promise<string> {
   if (!invId) throw new Error(`inventoryItem non trovato per la variante ${variantId}`);
   return invId;
 }
+
 /**
  * Abilita/disabilita tracking sulle varianti:
- * - InventoryItem.tracked = tracks
- * - Variant.inventoryPolicy = DENY (se tracked) / CONTINUE (se non tracked)
+ *  - InventoryItem.tracked = tracks
+ *  - Variant.inventoryPolicy = DENY (se tracked) / CONTINUE (se non tracked)
  */
 async function setVariantTracking(params: {
   productId: string;
   variantIds: string[];
-  tracks: boolean; // true => tracked, false => not tracked
-  policy?: "DENY" | "CONTINUE"; // default: DENY se tracks=true, CONTINUE se tracks=false
+  tracks: boolean;                      // true => tracked, false => not tracked
+  policy?: "DENY" | "CONTINUE";         // default: DENY se tracks=true, CONTINUE se tracks=false
 }) {
   const { productId, variantIds, tracks } = params;
   const policy = params.policy ?? (tracks ? "DENY" : "CONTINUE");
   if (!variantIds.length) return;
+
   // 1) Toggle tracked sull'InventoryItem
   for (const vid of variantIds) {
     const inventoryItemId = await getInventoryItemId(vid);
-    const upd = await adminFetchGQL<{ inventoryItemUpdate: { userErrors?: { message: string }[] } }>(M_INVENTORY_ITEM_UPDATE, {
-      id: inventoryItemId,
-      input: { tracked: tracks }
-    });
+    const upd = await adminFetchGQL<{
+      inventoryItemUpdate: { userErrors?: { message: string }[] }
+    }>(M_INVENTORY_ITEM_UPDATE, { id: inventoryItemId, input: { tracked: tracks } });
     const errs1 = (upd as any)?.inventoryItemUpdate?.userErrors ?? [];
     if (errs1.length) {
       throw new Error(`inventoryItemUpdate error: ${errs1.map((e: any) => e.message).join(" | ")}`);
     }
   }
+
   // 2) Allinea inventoryPolicy sulla variante
   const variantsPayload = variantIds.map((id) => ({ id, inventoryPolicy: policy }));
   const r = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors?: { message: string }[] } }>(
@@ -382,17 +383,27 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
   } catch {
     // ignore
   }
-  const createRes = await adminFetchGQL<{ productCreateMedia: { media?: { id: string }[]; mediaUserErrors?: { field?: string[]; message: string }[]; }; }>(M_PRODUCT_CREATE_MEDIA, {
+
+  const createRes = await adminFetchGQL<{
+    productCreateMedia: {
+      media?: { id: string }[];
+      mediaUserErrors?: { field?: string[]; message: string }[];
+    };
+  }>(M_PRODUCT_CREATE_MEDIA, {
     productId,
     media: [{ mediaContentType: "IMAGE", originalSource: imageUrl }],
   });
-  const mErrs = (createRes?.productCreateMedia?.mediaUserErrors as { field?: string[]; message: string }[] | undefined) || [];
+
+  const mErrs =
+    (createRes?.productCreateMedia?.mediaUserErrors as { field?: string[]; message: string }[] | undefined) || [];
   if (mErrs.length) {
     const msg = mErrs.map((e: { message: string }) => e.message).join(" | ");
     throw new Error(`productCreateMedia error: ${msg}`);
   }
+
   const mediaId = createRes?.productCreateMedia?.media?.[0]?.id;
   if (!mediaId) throw new Error("productCreateMedia: nessun media creato/collegato");
+
   const featRes = await adminFetchGQL<{ productSetFeaturedMedia: { userErrors?: { message: string }[] } }>(
     M_PRODUCT_SET_FEATURED,
     { productId, mediaId }
@@ -405,16 +416,19 @@ async function attachFeaturedImage(productId: string, imageUrl: string) {
 }
 
 // --- API pubbliche ---
+
 /**
  * Crea/riusa il prodotto "Posto" (ACTIVE + pubblicato) con 1 sola variante.
  * Tracking: ON (inventario monitorato) + policy DENY.
  */
 export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<EnsureSeatUnitResult> {
   const seatTitle = buildSeatTitle(input.titleBase, input.date, input.time);
+
   const existing = await findProductByExactTitle(seatTitle, "SeatUnit");
   if (existing) {
     const variantId = existing.variants?.edges?.[0]?.node?.id;
     if (!variantId) throw new Error("Seat esistente ma senza variante");
+
     // Assicura tracking ON anche sugli esistenti
     await setVariantTracking({
       productId: existing.id,
@@ -422,8 +436,10 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
       tracks: true,
       policy: "DENY",
     });
+
     return { productId: existing.id, variantId, created: false };
   }
+
   if (input.dryRun) {
     return {
       productId: "gid://shopify/Product/NEW_SEAT_DRYRUN",
@@ -431,22 +447,26 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
       created: false,
     };
   }
+
   const product = await createProductActive({
     title: seatTitle,
     templateSuffix: input.templateSuffix,
     tags: Array.from(new Set([...(input.tags || []), "SeatUnit"])),
     descriptionHtml: input.description || undefined,
   });
+
   // Leggi variante e abilita tracking
   const prodFull = await getProductById(product.id);
   const variantId = prodFull?.variants?.edges?.[0]?.node?.id;
   if (!variantId) throw new Error("Seat creato ma senza variante (post read-by-id)");
+
   await setVariantTracking({
     productId: product.id,
     variantIds: [variantId],
     tracks: true,
     policy: "DENY",
   });
+
   return { productId: product.id, variantId, created: true };
 }
 
@@ -461,6 +481,7 @@ export async function ensureInventory(opts: {
   dryRun?: boolean;
 }) {
   const locationId = opts.locationId || (await getDefaultLocationId());
+
   if (opts.dryRun) {
     return {
       ok: true,
@@ -468,17 +489,16 @@ export async function ensureInventory(opts: {
       set: { variantId: opts.variantId, locationId, name: "available", quantity: opts.quantity },
     };
   }
+
   const Q_VAR = /* GraphQL */ `
     query VariantInv($id: ID!) {
-      productVariant(id: $id) {
-        id
-        inventoryItem { id }
-      }
+      productVariant(id: $id) { id inventoryItem { id } }
     }
   `;
   const varData = await adminFetchGQL<{ productVariant: { inventoryItem: { id: string } | null } }>(Q_VAR, { id: opts.variantId });
   const inventoryItemId = varData.productVariant?.inventoryItem?.id;
   if (!inventoryItemId) throw new Error("inventoryItem non trovato per la variante");
+
   const gqlInput = {
     name: "available" as const,
     reason: "correction" as const,
@@ -488,12 +508,14 @@ export async function ensureInventory(opts: {
       { inventoryItemId, locationId, quantity: opts.quantity, compareQuantity: null },
     ],
   };
+
   const res = await adminFetchGQL<{ inventorySetQuantities: { userErrors: { field: string[]; message: string }[] } }>(
     M_INVENTORY_SET_QUANTITIES,
     { input: gqlInput }
   );
   const errs = (res as any).inventorySetQuantities?.userErrors || [];
   if (errs.length) throw new Error(`inventorySetQuantities error: ${errs.map((e: any) => e.message).join(" | ")}`);
+
   return { ok: true };
 }
 
@@ -503,6 +525,7 @@ export async function ensureInventory(opts: {
  */
 export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBundleResult> {
   const title = buildBundleTitle(input.titleBase, input.date, input.time);
+
   const existing = await findProductByExactTitle(title, "Bundle");
   if (existing) {
     const current: Record<string, string | undefined> = {};
@@ -516,6 +539,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       else if (t.includes("bambino")) current["bambino"] = v.id;
       else if (t.includes("handicap")) current["handicap"] = v.id;
     }
+
     // Tracking OFF/CONTINUE anche per gli esistenti
     const existingVariantIds = Object.values(current).filter(Boolean) as string[];
     if (existingVariantIds.length) {
@@ -526,6 +550,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
         policy: "CONTINUE",
       });
     }
+
     // se mancano varianti richieste, le aggiungo
     const needed = variantNamesForMode(input.mode).filter((k) => !current[k]);
     if (needed.length && !input.dryRun) {
@@ -536,8 +561,10 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       );
       const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
       if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
+
       const created = out.productVariantsBulkCreate.productVariants || [];
       const createdMap = mapVariantIdsFromNodes(created);
+
       // tracking OFF anche sulle nuove
       const newIds = created.map(v => v.id).filter(Boolean) as string[];
       if (newIds.length) {
@@ -548,6 +575,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
           policy: "CONTINUE",
         });
       }
+
       return {
         productId: existing.id,
         variantMap: {
@@ -560,6 +588,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
         createdVariants: created.length,
       };
     }
+
     return {
       productId: existing.id,
       variantMap: {
@@ -572,6 +601,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       createdVariants: 0,
     };
   }
+
   if (input.dryRun) {
     const ret: Record<"unico" | "adulto" | "bambino" | "handicap", string | undefined> = {
       unico: "gid://shopify/ProductVariant/DRYRUN_UNICO",
@@ -580,22 +610,19 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       handicap: "gid://shopify/ProductVariant/DRYRUN_HANDICAP",
     };
     if (input.mode === "unico") ret.adulto = ret.bambino = ret.handicap = undefined;
-    return {
-      productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN",
-      variantMap: ret,
-      createdProduct: false,
-      createdVariants: 0
-    };
+    return { productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN", variantMap: ret, createdProduct: false, createdVariants: 0 };
   }
+
   // crea prodotto (ACTIVE + publish sui canali configurati)
   const product = await createProductActive({
     title,
     templateSuffix: input.templateSuffix,
-    // ⬇️ SOLO i tag scelti in UI + "Bundle" (niente auto-tag col eventHandle)
+    // SOLO i tag scelti in UI + "Bundle"
     tags: Array.from(new Set([...(input.tags || []), "Bundle"])),
     descriptionHtml: input.description || undefined,
     imageUrl: undefined, // feature image la settiamo dopo via media
   });
+
   // attach featured image se presente
   if (input.image) {
     try {
@@ -604,18 +631,22 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       console.warn("attachFeaturedImage warning:", err);
     }
   }
+
   // varianti richieste
   const needed = variantNamesForMode(input.mode);
   const variants = needed.map((k) => ({ optionValues: [{ optionName: "Title", name: labelForVariant(k) }] }));
+
   const out = await adminFetchGQL<{ productVariantsBulkCreate: { productVariants?: any[]; userErrors: { message: string }[] } }>(
     M_PRODUCT_VARIANTS_BULK_CREATE,
     { productId: product.id, variants, strategy: "REMOVE_STANDALONE_VARIANT" }
   );
   const errs = (out as any).productVariantsBulkCreate?.userErrors || [];
   if (errs.length) throw new Error(`variantsBulkCreate error: ${errs.map((e: any) => e.message).join(" | ")}`);
+
   // varianti create
   const created = out.productVariantsBulkCreate.productVariants || [];
   const ret = mapVariantIdsFromNodes(created);
+
   // Tracking OFF/CONTINUE sulle nuove varianti
   const createdIds = created.map(v => v.id).filter(Boolean) as string[];
   if (createdIds.length) {
@@ -626,11 +657,13 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
       policy: "CONTINUE",
     });
   }
+
   // Se per qualsiasi motivo non arrivano le varianti, fallback: leggi per ID e applica tracking OFF
   if (!ret.unico && !ret.adulto && !ret.bambino && !ret.handicap) {
     const full = await getProductById(product.id);
     const edges = full?.variants?.edges?.map((e: any) => e.node) || [];
     const mapped = mapVariantIdsFromNodes(edges);
+
     const fallbackIds = edges.map((n: any) => n?.id).filter(Boolean) as string[];
     if (fallbackIds.length) {
       await setVariantTracking({
@@ -640,8 +673,10 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
         policy: "CONTINUE",
       });
     }
+
     return { productId: product.id, variantMap: mapped, createdProduct: true, createdVariants: needed.length };
   }
+
   return { productId: product.id, variantMap: ret, createdProduct: true, createdVariants: created.length };
 }
 
@@ -658,6 +693,7 @@ export async function setVariantPrices(
       id,
       price: (eur as number).toFixed(2),
     }));
+
   const M = /* GraphQL */ `
     mutation PVBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
       productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -665,10 +701,12 @@ export async function setVariantPrices(
       }
     }
   `;
+
   const r = await adminFetchGQL<{ productVariantsBulkUpdate: { userErrors: { message: string }[] } }>(M, {
     productId,
     variants: variantsInput,
   });
+
   const errs = (r as any).productVariantsBulkUpdate?.userErrors || [];
   if (errs.length) throw new Error(`productVariantsBulkUpdate error: ${errs.map((e: any) => e.message).join(" | ")}`);
   return { ok: true };
@@ -685,9 +723,11 @@ export async function ensureVariantLeadsToSeat(opts: {
   dryRun?: boolean;
 }) {
   const { bundleVariantId, seatVariantId, componentQuantity = 1, dryRun } = opts;
+
   if (dryRun) {
     return { ok: true, created: false, updated: false, qty: componentQuantity };
   }
+
   // helper: scrivi/aggiorna i due metafield lato variante Bundle
   async function upsertSeatMetafields() {
     await adminFetchGQL(M_METAFIELDS_SET, {
@@ -696,19 +736,20 @@ export async function ensureVariantLeadsToSeat(opts: {
           ownerId: bundleVariantId,
           namespace: "sinflora",
           key: "seat_unit",
-          type: "variant_reference", // riferimento a ProductVariant
-          value: seatVariantId, // GID della variante SeatUnit
+          type: "variant_reference",         // riferimento a ProductVariant
+          value: seatVariantId,              // GID della variante SeatUnit
         },
         {
           ownerId: bundleVariantId,
           namespace: "sinflora",
           key: "seats_per_ticket",
-          type: "number_integer", // 1 o 2
+          type: "number_integer",            // 1 o 2
           value: String(componentQuantity),
         },
       ],
     });
   }
+
   // 1) Prova a creare la relationship
   const createInput = [
     {
@@ -718,6 +759,7 @@ export async function ensureVariantLeadsToSeat(opts: {
       ],
     },
   ];
+
   let res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
     M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
     { input: createInput }
@@ -728,6 +770,7 @@ export async function ensureVariantLeadsToSeat(opts: {
     await upsertSeatMetafields(); // dopo CREATE
     return { ok: true, created: true, updated: false, qty: componentQuantity };
   }
+
   // 2) Se esiste già, aggiorna la quantità della relationship
   const updateInput = [
     {
@@ -737,6 +780,7 @@ export async function ensureVariantLeadsToSeat(opts: {
       ],
     },
   ];
+
   res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
     M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
     { input: updateInput }
@@ -747,9 +791,11 @@ export async function ensureVariantLeadsToSeat(opts: {
     await upsertSeatMetafields(); // dopo UPDATE
     return { ok: true, created: false, updated: true, qty: componentQuantity };
   }
+
   const all = [...errs, ...errs2].map((e) => e?.message || JSON.stringify(e)).join("; ");
   throw new Error(`Shopify GQL errors (ensureVariantLeadsToSeat): ${all}`);
 }
+
 async function ensureVariantEventuallyVisible(variantId: string, tries = 5) {
   const Q = /* GraphQL */ `
     query PV($id: ID!) {
