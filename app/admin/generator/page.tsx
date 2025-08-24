@@ -673,14 +673,15 @@ export default function AdminGeneratorUIV2() {
             />
             {/* Sabato */}
             <SectionPrices
-              title="Sabato"
-              unico={satUnico}
-              setUnico={setSatUnico}
-              unicoPrice={satUnicoPrice}
-              setUnicoPrice={setSatUnUnicoPrice => setSatUnicoPrice(satUnUnicoPrice)}
-              triple={satTriple}
-              setTriple={setSatTriple}
-            />
+  title="Sabato"
+  unico={satUnico}
+  setUnico={setSatUnico}
+  unicoPrice={satUnicoPrice}
+  setUnicoPrice={setSatUnicoPrice}
+  triple={satTriple}
+  setTriple={setSatTriple}
+/>
+
             {/* Domenica */}
             <SectionPrices
               title="Domenica"
