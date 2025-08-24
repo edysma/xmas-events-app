@@ -28,6 +28,8 @@ type EnsureSeatUnitInput = {
   tags?: string[];
   description?: string | null;
   dryRun?: boolean;
+  /** Se false, NON pubblica sui canali (default: true) */
+  publish?: boolean;
 };
 
 type EnsureSeatUnitResult = {
@@ -50,6 +52,8 @@ type EnsureBundleInput = {
   tags?: string[];
   description?: string | null;
   dryRun?: boolean;
+  /** Se false, NON pubblica sui canali (default: true) */
+  publish?: boolean;
 };
 
 type EnsureBundleResult = {
@@ -202,7 +206,7 @@ const M_INVENTORY_ITEM_UPDATE = /* GraphQL */ `
 `;
 
 const M_PV_BULK_UPDATE_TRACK = /* GraphQL */ `
-  mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  mutation PVBulkUpdateTrack($productId: ID!, $variants: [ProductVariantsBulkInput!]!] {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
       userErrors { field message }
     }
@@ -263,6 +267,8 @@ async function createProductActive(opts: {
   descriptionHtml?: string;
   publishToPublicationId?: string;
   imageUrl?: string;
+  /** Se false, NON pubblica sui canali (default: true) */
+  publish?: boolean;
 }) {
   const res = await adminFetchGQL<{ productCreate: { product?: any; userErrors: { message: string }[] } }>(
     M_PRODUCT_CREATE,
@@ -282,13 +288,16 @@ async function createProductActive(opts: {
   const product = (res as any).productCreate?.product;
   if (!product?.id) throw new Error("productCreate: product.id mancante");
 
-  // 1) Pubblica Negozio online (default o ID passato)
-  await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
+  // Pubblicazione condizionale (default ON)
+  if (opts.publish !== false) {
+    // 1) Pubblica Negozio online (default o ID passato)
+    await publishProductToOnlineStore(product.id, opts.publishToPublicationId);
 
-  // 2) Pubblica anche sul canale "Xmas Admin API v2" se configurato in ENV
-  const xmasPubId = getXmasAdminPublicationId();
-  if (xmasPubId) {
-    await publishProductToPublication({ productId: product.id, publicationId: xmasPubId });
+    // 2) Pubblica anche sul canale "Xmas Admin API v2" se configurato in ENV
+    const xmasPubId = getXmasAdminPublicationId();
+    if (xmasPubId) {
+      await publishProductToPublication({ productId: product.id, publicationId: xmasPubId });
+    }
   }
 
   return product;
@@ -453,6 +462,7 @@ export async function ensureSeatUnit(input: EnsureSeatUnitInput): Promise<Ensure
     templateSuffix: input.templateSuffix,
     tags: Array.from(new Set([...(input.tags || []), "SeatUnit"])),
     descriptionHtml: input.description || undefined,
+    publish: input.publish, // <- toggle pubblicazione
   });
 
   // Leggi variante e abilita tracking
@@ -613,7 +623,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     return { productId: "gid://shopify/Product/NEW_BUNDLE_DRYRUN", variantMap: ret, createdProduct: false, createdVariants: 0 };
   }
 
-  // crea prodotto (ACTIVE + publish sui canali configurati)
+  // crea prodotto (ACTIVE) — pubblicazione condizionale
   const product = await createProductActive({
     title,
     templateSuffix: input.templateSuffix,
@@ -621,6 +631,7 @@ export async function ensureBundle(input: EnsureBundleInput): Promise<EnsureBund
     tags: Array.from(new Set([...(input.tags || []), "Bundle"])),
     descriptionHtml: input.description || undefined,
     imageUrl: undefined, // feature image la settiamo dopo via media
+    publish: input.publish, // <- toggle pubblicazione
   });
 
   // attach featured image se presente
