@@ -360,10 +360,16 @@ export async function POST(req: NextRequest) {
       bundleProductIds.push(bundleProd.id);
 
       const variantsPlan = item.bundle.variants.map(v => ({
-        title: v.title,
-        seats_per_ticket: v.seats_per_ticket,
-        metafields: v.metafields.map(mf => mf.key === "seat_unit" ? { ...mf, value: seatVar.id } : mf),
-      }));
+  title: v.title,
+  seats_per_ticket: v.seats_per_ticket,
+  metafields: v.metafields.map(mf => {
+    if (mf.key === "seat_unit") {
+      // GraphQL richiede 'variant_reference' e il value = GID della variante SeatUnit
+      return { ...mf, type: "variant_reference", value: seatVar.id };
+    }
+    return mf; // es. seats_per_ticket resta number_integer
+  }),
+}));
 
       const bundleVars = await ensureBundleVariants({
         productId: bundleProd.id, variantsPlan,
