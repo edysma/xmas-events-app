@@ -201,8 +201,6 @@ async function previewFromFeed(req: NextRequest, body: any) {
 }
 
 async function generateFromFeed(req: NextRequest, body: any) {
-  const publish = body.publish !== false; // default ON
-
   // Validazioni minime per creazione reale
   if (body.dryRun !== false) {
     return NextResponse.json({ ok: false, error: "bad_request", detail: "dryRun:false richiesto per creare dal feed" }, { status: 400 });
@@ -214,8 +212,8 @@ async function generateFromFeed(req: NextRequest, body: any) {
     return NextResponse.json({ ok: false, error: "missing_capacity", detail: 'Passa "capacityPerSlot" > 0' }, { status: 400 });
   }
 
-  const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || "";
-  if (publish && !publicationId) {
+  const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
+  if (!publicationId) {
     return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
   }
 
@@ -289,7 +287,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
 
       // crea/riusa Seat
       const seat = await ensureSeatUnit({
-        date, time, titleBase: eventHandle, tags, description, templateSuffix, dryRun: false, publish,
+        date, time, titleBase: eventHandle, tags, description, templateSuffix, dryRun: false,
       });
       if (seat.created) seatsCreated++;
 
@@ -302,7 +300,7 @@ async function generateFromFeed(req: NextRequest, body: any) {
       // bundle triple
       const bundle = await ensureBundle({
         eventHandle, date, time, titleBase: eventHandle, templateSuffix, tags, description,
-        dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false, publish,
+        dayType: dt, mode: "triple", "priceTier€": tier, dryRun: false,
       });
       if (bundle.createdProduct) bundlesCreated++;
       variantsCreated += bundle.createdVariants ?? 0;
@@ -332,13 +330,11 @@ async function generateFromFeed(req: NextRequest, body: any) {
         pricesUpdated += Object.keys(pricesToSet).length;
       }
 
-      // activate + publish (solo se richiesto)
-      if (publish && publicationId) {
-        await activateProduct(seat.productId);
-        await publishProductToPublication({ productId: seat.productId, publicationId });
-        await activateProduct(bundle.productId);
-        await publishProductToPublication({ productId: bundle.productId, publicationId });
-      }
+      // activate + publish (Seat + Bundle)
+      await activateProduct(seat.productId);
+      await publishProductToPublication({ productId: seat.productId, publicationId });
+      await activateProduct(bundle.productId);
+      await publishProductToPublication({ productId: bundle.productId, publicationId });
 
       // preview breve (solo primi 10)
       if (preview.length < 10) {
@@ -385,7 +381,6 @@ export async function POST(req: NextRequest) {
       tags?: string[];
       description?: string;
       imageUrl?: string;
-      publish?: boolean;
     };
     try {
       body = await req.json();
@@ -418,13 +413,11 @@ export async function POST(req: NextRequest) {
       tags?: string[];
       description?: string;
       imageUrl?: string;
-      publish?: boolean;
     };
     const dryRun = input.dryRun !== false; // default true
-    const publish = input.publish !== false; // default ON
 
-    const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID || "";
-    if (!dryRun && publish && !publicationId) {
+    const publicationId = process.env.SHOPIFY_ONLINE_STORE_PUBLICATION_ID;
+    if (!dryRun && !publicationId) {
       return NextResponse.json({ ok: false, error: "missing_publication_id", detail: "Configura SHOPIFY_ONLINE_STORE_PUBLICATION_ID" }, { status: 500 });
     }
 
@@ -467,7 +460,7 @@ export async function POST(req: NextRequest) {
 
         // Seat Unit
         const seat = await ensureSeatUnit({
-          date, time, titleBase: input.eventHandle, tags, description, templateSuffix, dryRun, publish,
+          date, time, titleBase: input.eventHandle, tags, description, templateSuffix, dryRun,
         });
         if (!dryRun && seat.created) seatsCreated++;
 
@@ -484,9 +477,9 @@ export async function POST(req: NextRequest) {
           eventHandle: input.eventHandle,
           date, time, titleBase: input.eventHandle,
           templateSuffix, tags, description,
-          image: imageUrl,
+          image: imageUrl, 
           dayType: dt, mode, "priceTier€": tier,
-          dryRun, publish,
+          dryRun,
         });
         if (!dryRun) {
           if (bundle.createdProduct) bundlesCreated++;
@@ -526,8 +519,8 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Activate + Publish (solo se richiesto)
-        if (!dryRun && publish && publicationId) {
+        // Activate + Publish (quando non è dry-run)
+        if (!dryRun && publicationId) {
           await activateProduct(seat.productId);
           await publishProductToPublication({ productId: seat.productId, publicationId });
           await activateProduct(bundle.productId);
