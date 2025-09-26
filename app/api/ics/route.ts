@@ -61,7 +61,7 @@ export async function GET(req: Request){
   return new Response(lines, {
     headers: {
       'Content-Type': 'text/calendar; charset=utf-8',
-      'Content-Disposition': `attachment; filename="evento.ics"`
+      'Content-Disposition': `attachment; filename="sinflora.ics"`
     }
   });
 }
