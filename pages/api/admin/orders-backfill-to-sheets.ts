@@ -294,24 +294,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         orderName: o.name,
         orderId: o.id,
         created_at: o.created_at,
-        line_items: (Array.isArray(o.line_items) ? o.line_items : []).map((li: any) => {
-          const out: any = {
-            id: li.id,
-            title: li.title,
-            variant_title: li.variant_title,
-            product_id: li.product_id,
-            variant_id: li.variant_id,
-            sku: li.sku,
-            quantity: li.quantity,
-            properties: li.properties,
-          };
-          if (li.bundle_parent !== undefined) out.bundle_parent = li.bundle_parent;
-          if (li.bundle_components !== undefined) out.bundle_components = li.bundle_components;
-          if (li.components !== undefined) out.components = li.components;
-          if (li.kit_components !== undefined) out.kit_components = li.kit_components;
-          if (li.selling_plan_allocation !== undefined) out.selling_plan_allocation = li.selling_plan_allocation;
-          return out;
-        }),
+        line_items: (Array.isArray(o.line_items) ? o.line_items : []).map((li: any) => li),
+
       }));
       return res.status(200).json({ ok: true, debug: 'li', since, until, orders_count: orders.length, orders: dbg });
     }
