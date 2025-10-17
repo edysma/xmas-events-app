@@ -3,7 +3,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { google } from 'googleapis';
 
 // === Config ===
-const SCOPES = ['https://www.googleapis.com/auth/spreadssheets'];
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const API_VERSION = '2023-10'; // ok per backfill
 
 // === Tipi ===
@@ -76,49 +76,74 @@ function extractDateSlot(li: any) {
   return { date, slot };
 }
 
-// === Nuovo: conteggio tipi dalle PROPERTIES per persona o numeriche ===
-function countTypesFromProperties(li: any): { counts: Counts; total: number; usedProps: boolean } {
+// === Nuovo: conteggio tipi robusto dalle PROPERTIES ===
+function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
-  let usedProps = false;
+  let used = false;
 
   const props = Array.isArray(li.properties) ? li.properties : [];
-  const propMap: Record<string, string> = {};
-  for (const p of props) if (p?.name) propMap[String(p.name).toLowerCase().trim()] = String(p.value ?? '').trim();
+  const entries = props.map((p: any) => ({
+    k: String(p?.name ?? '').toLowerCase().trim(),
+    v: String(p?.value ?? '').toLowerCase().trim(),
+    rawV: String(p?.value ?? ''),
+  }));
 
-  // A) Per-persona: "Tipo", "Tipologia", "Tariffa", "Ticket", "Categoria" con o senza numero (Tipo 1, Tipo 2, ...)
-  const perKeys = Object.keys(propMap).filter(k => /^(tipo|tipologia|tariffa|ticket|categoria)(\s*\d+)?$/.test(k));
-  for (const k of perKeys) {
-    const v = propMap[k];
-    if (!v) continue;
-    let t = normTicketType(v);
-    if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
-    if (t === 'Sconosciuto') t = 'Unico';
-    (counts as any)[t] += 1;
-    usedProps = true;
-  }
+  const inc = (label: keyof Counts, n = 1) => { (counts as any)[label] += n; used = true; };
 
-  // B) Numeriche: "Adulti: 2", "Bambini: 1", "Unico: 3", ecc.
-  const numericSets: Array<[keyof Counts, string[]]> = [
-    ['Adulto', ['adulto', 'adulti', 'adult']],
-    ['Bambino', ['bambino', 'bambini', 'child', 'kids', 'kid']],
-    ['Disabilità', ['disabilità', 'handicap', 'invalid']],
-    ['Unico', ['unico', 'singolo', 'unique']],
-  ];
-  for (const [label, keys] of numericSets) {
-    for (const kk of keys) {
-      const raw = propMap[kk];
-      if (!raw) continue;
-      const m = String(raw).match(/\d+/); // prima cifra trovata
-      const n = m ? parseInt(m[0], 10) : NaN;
-      if (!Number.isNaN(n) && n > 0) {
-        (counts as any)[label] += n;
-        usedProps = true;
-      }
+  const keyHas = (k: string, frag: RegExp) => frag.test(k);
+  const valHas = (v: string, frag: RegExp) => frag.test(v);
+
+  const R_ADULTO = /adult/;
+  const R_BAMBINO = /(bambin|child|kid)/;
+  const R_DISAB = /(disab|handicap|invalid)/;
+  const R_UNICO = /(unico|unique|singol)/;
+  const R_TIPO_FIELD = /(tipo|tipologia|tariffa|ticket|categoria|bigliett)/;
+
+  for (const { k, v, rawV } of entries) {
+    // 1) Se il VALORE contiene adulto/bambino/... -> +1 per persona
+    if (valHas(v, R_ADULTO)) { inc('Adulto'); continue; }
+    if (valHas(v, R_BAMBINO)) { inc('Bambino'); continue; }
+    if (valHas(v, R_DISAB)) { inc('Disabilità'); continue; }
+    if (valHas(v, R_UNICO)) { inc('Unico'); continue; }
+
+    // 2) Se il NOME contiene adulto/bambino/... usa numero nel valore (o bool=1)
+    if (keyHas(k, R_ADULTO)) {
+      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
+      if (n > 0) inc('Adulto', n); continue;
+    }
+    if (keyHas(k, R_BAMBINO)) {
+      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
+      if (n > 0) inc('Bambino', n); continue;
+    }
+    if (keyHas(k, R_DISAB)) {
+      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
+      if (n > 0) inc('Disabilità', n); continue;
+    }
+    if (keyHas(k, R_UNICO)) {
+      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
+      if (n > 0) inc('Unico', n); continue;
+    }
+
+    // 3) Campi "Tipo/Tipologia/Ticket/..." (anche "Tipo 1", "Tipologia 2", "Tipo biglietto 1")
+    if (keyHas(k, R_TIPO_FIELD) && v) {
+      let t = 'Sconosciuto';
+      if (R_ADULTO.test(v)) t = 'Adulto';
+      else if (R_BAMBINO.test(v)) t = 'Bambino';
+      else if (R_DISAB.test(v)) t = 'Disabilità';
+      else if (R_UNICO.test(v)) t = 'Unico';
+      inc(t as keyof Counts);
+      continue;
+    }
+
+    // 4) Ultima spiaggia: se valore è un numero e il nome contiene "persone" o "qty", mettilo in Unico
+    if (/\d+/.test(v) && /(persone|persona|qty|quantita|quantità|pezzi)/.test(k)) {
+      const n = parseInt(v.match(/\d+/)![0], 10);
+      if (n > 0) inc('Unico', n);
     }
   }
 
   const total = counts.Adulto + counts.Bambino + counts.Disabilità + counts.Unico + counts.Sconosciuto;
-  return { counts, total, usedProps };
+  return { counts, total, used };
 }
 
 // === Trasforma un ordine in righe aggregate ===
@@ -150,11 +175,11 @@ function collectRowsFromOrder(order: any) {
     const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
     const { date, slot } = extractDateSlot(li);
 
-    // 1) Prova a contare dalle properties (per persona o numeriche)
+    // 1) Prova a contare dalle properties (per-persona o numeriche)
     const viaProps = countTypesFromProperties(li);
 
-    // 2) Se non c'era nulla nelle properties, usa variante/titolo/SKU * quantity
-    if (!viaProps.usedProps) {
+    // 2) Se nada nelle properties, usa variante/titolo/SKU * quantity
+    if (!viaProps.used) {
       const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
       let t = normTicketType(source);
       if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
@@ -174,10 +199,7 @@ function collectRowsFromOrder(order: any) {
     }
     const b = buckets.get(key)!;
 
-    const addQty = viaProps.usedProps
-      ? (viaProps.total || Number(li.quantity || 0))
-      : Number(li.quantity || 0);
-
+    const addQty = viaProps.used ? (viaProps.total || Number(li.quantity || 0)) : Number(li.quantity || 0);
     b.qtyTotal += addQty;
     b.counts.Adulto      += viaProps.counts.Adulto;
     b.counts.Bambino     += viaProps.counts.Bambino;
@@ -216,7 +238,8 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
 
   const orders: any[] = [];
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,line_items,currency,total_price,subtotal_price,total_tax,total_discounts,current_total_price,payment_gateway_names`;
+  // campi essenziali (line_items contiene title, variant_title, sku, properties, quantity)
+  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,line_items`;
 
   while (nextUrl) {
     const resp = await fetch(nextUrl, {
