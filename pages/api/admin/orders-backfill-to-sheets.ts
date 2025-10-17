@@ -4,7 +4,7 @@ import { google } from 'googleapis';
 
 // === Config ===
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-const API_VERSION = '2024-10'; // usiamo l'API recente
+const API_VERSION = '2024-10';
 
 type Counts = { Adulto: number; Bambino: number; Disabilità: number; Unico: number; Sconosciuto: number };
 
@@ -75,7 +75,7 @@ function extractDateSlot(li: any) {
   return { date, slot };
 }
 
-// === Conteggio tipi dalle PROPERTIES (per i nuovi ordini) ===
+// === Conteggio tipi dalle PROPERTIES (nuovi ordini) ===
 function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
   let used = false;
@@ -126,13 +126,10 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
 // === Parser del riepilogo in note_attributes["_Riepilogo biglietti"] ===
 function parseNoteSummary(text: string) {
   const lines = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  // Trova linee con pattern: "... → Adulto × 4 | Bambino × 3 | Disabilità × 1"
-  const entries: Array<{event?: string; date?: string; slot?: string; counts: Counts}> = [];
+  const entries: Array<{ event?: string; date?: string; slot?: string; counts: Counts }> = [];
 
-  // helper per contare da un frammento "Adulto × 4 | Bambino x 3"
   const countFromFragment = (frag: string) => {
     const c: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
-    // match "Parola × 3" oppure "Parola x 3"
     const re = /([A-Za-zÀ-ÿ]+)\s*[×x]\s*(\d+)/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(frag)) !== null) {
@@ -148,30 +145,32 @@ function parseNoteSummary(text: string) {
   };
 
   for (const ln of lines) {
-    // es. "2025-10-18 16:00 → Adulto × 4 | Bambino × 3"
     const arrow = ln.split('→');
     if (arrow.length >= 2) {
       const left = arrow[0].trim();
       const right = arrow.slice(1).join('→').trim();
 
-      // data + orario: supporta "2025-10-18 16:00" oppure "18/10/2025 16:00"
+      let event = '';
+      // se c'è un " — " all'inizio, prendi la parte prima come evento
+      const partEvt = left.split('—')[0]?.trim();
+      if (partEvt && /wondy|fanta/i.test(partEvt)) event = partEvt;
+
       let date = '';
       let slot = '';
       const mIso = left.match(/(20\d{2}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
       const mIt = left.match(/(\d{1,2}\/\d{1,2}\/20\d{2})\s+(\d{1,2}:\d{2})/);
       if (mIso) { date = mIso[1]; slot = mIso[2]; }
-      else if (mIt) { 
-        const [d,m,y] = mIt[1].split('/');
+      else if (mIt) {
+        const [d, m, y] = mIt[1].split('/');
         date = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
         slot = mIt[2];
       }
 
       const counts = countFromFragment(right);
-      entries.push({ date, slot, counts });
+      entries.push({ event, date, slot, counts });
     }
   }
 
-  // Se non ha trovato righe con "→", prova ad analizzare l'ultima riga come puro elenco
   if (!entries.length && lines.length) {
     entries.push({ counts: countFromFragment(lines[lines.length - 1]) });
   }
@@ -179,11 +178,25 @@ function parseNoteSummary(text: string) {
   return entries;
 }
 
-// === Utils backfill ===
+function getNoteSummaryEntries(order: any) {
+  const notes = Array.isArray(order.note_attributes) ? order.note_attributes : [];
+  const entry = notes.find((n: any) => String(n?.name).trim().toLowerCase() === '_riepilogo biglietti');
+  return entry ? parseNoteSummary(String(entry.value)) : [];
+}
+
+function guessEventFromOrder(order: any, orderTags: string[]) {
+  const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
+  for (const li of lineItems) {
+    const ev = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
+    if (ev !== 'Sconosciuto') return ev;
+  }
+  return 'Sconosciuto';
+}
+
+// == FETCH
 function asUTCStart(dateStr: string) { return `${dateStr}T00:00:00Z`; }
 function asUTCEnd(dateStr: string)   { return `${dateStr}T23:59:59Z`; }
 
-// == FETCH (normale)
 async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const shop = process.env.SHOP_DOMAIN!;
   const token = process.env.ADMIN_ACCESS_TOKEN!;
@@ -202,7 +215,7 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   return orders;
 }
 
-// === Trasforma un ordine in righe aggregate (versione attuale; integrazione note la faremo nello step successivo) ===
+// === Trasforma un ordine in righe aggregate (ora usa le note se presenti) ===
 function collectRowsFromOrder(order: any) {
   const buckets = new Map<string, {
     createdAt: string; orderName: string; orderId: string;
@@ -225,16 +238,63 @@ function collectRowsFromOrder(order: any) {
   const orderTags = (order.tags || '').split(',').map((t: string) => t.trim()).filter(Boolean);
   const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
 
+  // 0) Se c'è un riepilogo in note, lo usiamo come SORGENTE PRINCIPALE e NON contiamo i line items
+  const notesEntries = getNoteSummaryEntries(order);
+  if (notesEntries.length) {
+    const eventGuess = guessEventFromOrder(order, orderTags);
+    for (const e of notesEntries) {
+      const date = e.date || '';
+      const slot = e.slot || '';
+      const key = [orderId, eventGuess, date, slot].join('||');
+
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          createdAt, orderName, orderId, customerName, customerEmail,
+          event: eventGuess, date, slot,
+          counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
+          qtyTotal: 0,
+          totalGross, currency, payGws, processedAt,
+        });
+      }
+      const b = buckets.get(key)!;
+      const sum = e.counts.Adulto + e.counts.Bambino + e.counts.Disabilità + e.counts.Unico + e.counts.Sconosciuto;
+      b.qtyTotal += sum;
+      b.counts.Adulto      += e.counts.Adulto;
+      b.counts.Bambino     += e.counts.Bambino;
+      b.counts.Disabilità  += e.counts.Disabilità;
+      b.counts.Unico       += e.counts.Unico;
+      b.counts.Sconosciuto += e.counts.Sconosciuto;
+    }
+
+    // produce le righe e chiude
+    const rows: any[][] = [];
+    for (const b of buckets.values()) {
+      const mix = [
+        `Adulto | ${b.counts.Adulto}`,
+        `Bambino | ${b.counts.Bambino}`,
+        `Disabilità | ${b.counts.Disabilità}`,
+        `Unico | ${b.counts.Unico}`,
+        `Sconosciuto | ${b.counts.Sconosciuto}`
+      ].join(', ');
+
+      rows.push([
+        b.createdAt, b.orderName, b.orderId, b.customerName, b.customerEmail,
+        b.event, b.date, b.slot,
+        mix, b.counts.Adulto, b.counts.Bambino, b.counts.Disabilità, b.counts.Unico, b.counts.Sconosciuto, b.qtyTotal,
+        b.totalGross, b.currency, b.payGws, b.processedAt,
+      ]);
+    }
+    return rows;
+  }
+
+  // 1) Altrimenti contiamo dai line items (properties → fallback titolo/SKU)
   for (const li of lineItems) {
     if (li.gift_card === true) continue;
 
     const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
     const { date, slot } = extractDateSlot(li);
 
-    // 1) tenta properties
     const viaProps = countTypesFromProperties(li);
-
-    // 2) se niente nelle properties: usa titolo/sku * quantity
     if (!viaProps.used) {
       const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
       let t = normTicketType(source);
@@ -278,7 +338,7 @@ function collectRowsFromOrder(order: any) {
       b.createdAt, b.orderName, b.orderId, b.customerName, b.customerEmail,
       b.event, b.date, b.slot,
       mix, b.counts.Adulto, b.counts.Bambino, b.counts.Disabilità, b.counts.Unico, b.counts.Sconosciuto, b.qtyTotal,
-      totalGross, currency, payGws, processedAt,
+      b.totalGross, b.currency, b.payGws, b.processedAt,
     ]);
   }
   return rows;
@@ -311,13 +371,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const minISO = asUTCStart(since);
     const maxISO = asUTCEnd(until);
 
-    // 1) Scarica ordini
     let orders = await fetchOrdersInRange(minISO, maxISO);
-    if (filterOrderName) orders = orders.filter(o => String(o.name) === filterOrderName);
+    if (filterOrderName) orders = orders.filter((o: any) => String(o.name) === filterOrderName);
 
-    // ——— Modalità diagnostiche ———
+    // diagnostica già presente (notes, notesparse, li, q) — opzionale: lasciamo invariata
     if (debug === 'notes') {
-      const dbg = orders.slice(0, 5).map(o => ({
+      const dbg = orders.slice(0, 5).map((o: any) => ({
         orderName: o.name,
         orderId: o.id,
         created_at: o.created_at,
@@ -327,35 +386,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }));
       return res.status(200).json({ ok: true, debug: 'notes', since, until, orders_count: orders.length, orders: dbg });
     }
-
     if (debug === 'notesparse') {
-      const out = orders.map(o => {
-        const notes = Array.isArray(o.note_attributes) ? o.note_attributes : [];
-        const entry = notes.find((n: any) => String(n?.name).trim().toLowerCase() === '_riepilogo biglietti');
-        const parsed = entry ? parseNoteSummary(String(entry.value)) : [];
-        return {
-          orderName: o.name,
-          has_summary: Boolean(entry),
-          parsed, // array di blocchi { date?, slot?, counts{...} }
-          raw_summary: entry?.value ?? null,
-        };
+      const out = orders.map((o: any) => {
+        const parsed = getNoteSummaryEntries(o);
+        const entry = Array.isArray(o.note_attributes) ? o.note_attributes.find((n: any) => String(n?.name).trim().toLowerCase() === '_riepilogo biglietti') : null;
+        return { orderName: o.name, has_summary: Boolean(entry), parsed, raw_summary: entry?.value ?? null };
       });
       return res.status(200).json({ ok: true, debug: 'notesparse', since, until, orders_count: orders.length, orders: out });
     }
 
-    // ——— Flusso normale (dryRun/scrittura) ———
     const rowsAll: any[][] = [];
-    for (const order of orders) {
-      const rows = collectRowsFromOrder(order);
-      rowsAll.push(...rows);
-    }
+    for (const order of orders) rowsAll.push(...collectRowsFromOrder(order));
 
     if (dryRun) {
       return res.status(200).json({
         ok: true,
         dryRun: true,
-        since,
-        until,
+        since, until,
         orders_count: orders.length,
         rows_count: rowsAll.length,
         sample_rows: rowsAll.slice(0, 5),
@@ -367,13 +414,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await appendRowsToSheet(rowsAll.slice(i, i + BATCH));
     }
 
-    return res.status(200).json({
-      ok: true,
-      since,
-      until,
-      orders_count: orders.length,
-      rows_written: rowsAll.length,
-    });
+    return res.status(200).json({ ok: true, since, until, orders_count: orders.length, rows_written: rowsAll.length });
   } catch (err: any) {
     console.error('backfill error', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Unknown error' });
