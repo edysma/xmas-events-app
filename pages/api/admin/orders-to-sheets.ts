@@ -1,10 +1,10 @@
 // pages/api/admin/orders-to-sheets.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
+import getRawBody from 'raw-body';
 import { google } from 'googleapis';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-const IT_TZ = 'Europe/Rome';
 
 // ---------- Google Sheets client ----------
 function getSheetsClient() {
@@ -26,12 +26,9 @@ async function appendRowsToSheet(rows: any[][]) {
   });
 }
 
-// ---------- HMAC (Shopify) ----------
-function verifyShopifyHmac(req: NextApiRequest, secret: string) {
-  const hmacHeader = req.headers['x-shopify-hmac-sha256'] as string | undefined;
+// ---------- HMAC (Shopify) su RAW BODY ----------
+function verifyShopifyHmacFromRaw(rawBody: string, secret: string, hmacHeader?: string) {
   if (!hmacHeader) return false;
-  // Nota: in molti casi va bene usare JSON.stringify(req.body).
-  const rawBody = (req as any).rawBody ?? JSON.stringify(req.body);
   const digest = crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('base64');
   try {
     return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader));
@@ -44,7 +41,7 @@ function verifyShopifyHmac(req: NextApiRequest, secret: string) {
 function toRomeISO(dateStr: string | undefined) {
   if (!dateStr) return '';
   const d = new Date(dateStr);
-  return d.toISOString(); // Sheets mostrerà in locale se il file è su Europe/Rome
+  return d.toISOString();
 }
 function safeString(x: any) { return x == null ? '' : String(x); }
 
@@ -68,14 +65,12 @@ function pickEventFrom(lineTitle: string, productTitle: string, orderTags: strin
 }
 
 function extractDateSlot(li: any) {
-  // 1) properties
   const props = Array.isArray(li.properties) ? li.properties : [];
   const propMap: Record<string, string> = {};
   for (const p of props) if (p?.name) propMap[String(p.name).toLowerCase()] = String(p.value ?? '');
   let date = propMap['data'] || propMap['date'] || '';
   let slot = propMap['orario'] || propMap['ora'] || propMap['slot'] || '';
 
-  // 2) dal titolo: “ — YYYY-MM-DD — HH:mm”
   if ((!date || !slot) && typeof li.title === 'string') {
     const mDate = li.title.match(/(20\d{2}-\d{2}-\d{2})/);
     const mSlot = li.title.match(/\b(\d{1,2}:\d{2})\b/);
@@ -158,27 +153,41 @@ function collectRowsFromOrder(order: any) {
   return rows;
 }
 
-// ---------- Next config ----------
+// ---------- Disattiva il parser: ci serve il RAW body ----------
 export const config = {
   api: {
-    bodyParser: { sizeLimit: '2mb' },
+    bodyParser: false,
   },
 };
 
 // ---------- Handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const dryRun = String(req.query.dryRun || '') === '1';
+    const dryRun = String((req.query as any).dryRun || '') === '1';
     const secret = process.env.SHOPIFY_WEBHOOK_SECRET || '';
-
     const isWebhook = Boolean(req.headers['x-shopify-topic']);
+
+    // 1) Leggi RAW body
+    const buf = await getRawBody(req);
+    const rawBody = buf.toString('utf8');
+
+    // 2) Verifica HMAC (solo per chiamate da Shopify)
     if (isWebhook) {
       if (!secret) return res.status(500).json({ ok: false, error: 'SHOPIFY_WEBHOOK_SECRET not set' });
-      const ok = verifyShopifyHmac(req, secret);
+      const hmacHeader = req.headers['x-shopify-hmac-sha256'] as string | undefined;
+      const ok = verifyShopifyHmacFromRaw(rawBody, secret, hmacHeader);
       if (!ok) return res.status(401).json({ ok: false, error: 'Invalid HMAC' });
     }
 
-    const order = req.body && req.body.id ? req.body : null;
+    // 3) Parse JSON
+    let payload: any = {};
+    try {
+      payload = JSON.parse(rawBody || '{}');
+    } catch {
+      return res.status(400).json({ ok: false, error: 'Invalid JSON' });
+    }
+
+    const order = payload && payload.id ? payload : null;
     if (!order) return res.status(400).json({ ok: false, error: 'Invalid payload: expected order object' });
 
     const rows = collectRowsFromOrder(order);
