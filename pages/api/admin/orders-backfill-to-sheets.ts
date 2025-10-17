@@ -101,9 +101,29 @@ function collectRowsFromOrder(order: any) {
 
     const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
     const { date, slot } = extractDateSlot(li);
-    const typeRaw = safeString(li.variant_title || li.title);
-    let type = normTicketType(typeRaw);
-    if (type.toLowerCase().includes('handicap')) type = 'Disabilità';
+    // Determina la tipologia anche dalle properties (Tipo, Tipologia, ecc.)
+const props = Array.isArray(li.properties) ? li.properties : [];
+const propMap: Record<string, string> = {};
+for (const p of props) if (p?.name) propMap[String(p.name).toLowerCase()] = String(p.value ?? '');
+
+// prova a leggere da properties prima; poi variante/titolo/SKU
+const propType =
+  propMap['tipo'] ||
+  propMap['tipologia'] ||
+  propMap['tipo biglietto'] ||
+  propMap['biglietto'] ||
+  propMap['ticket'] ||
+  propMap['categoria'] ||
+  propMap['tariffa'] ||
+  '';
+
+const source = propType || safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
+let type = normTicketType(source);
+
+// normalizza sinonimi/varianti
+if (type.toLowerCase().includes('handicap')) type = 'Disabilità';
+if (type === 'Sconosciuto') type = 'Unico';
+
 
     const key = [orderId, event, date, slot].join('||');
     if (!buckets.has(key)) {
