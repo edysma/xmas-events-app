@@ -68,15 +68,14 @@ function extractDateSlot(li: any) {
   let date = propMap['data'] || propMap['date'] || '';
   let slot = propMap['orario'] || propMap['ora'] || propMap['slot'] || '';
   if ((!date || !slot) && typeof li.title === 'string') {
-    const mDate = li.title.match(/(20\\d{2}-\\d{2}-\\d{2})/);
-    const mSlot = li.title.match(/\\b(\\d{1,2}:\\d{2})\\b/);
+    const mDate = li.title.match(/(20\d{2}-\d{2}-\d{2})/);
+    const mSlot = li.title.match(/\b(\d{1,2}:\d{2})\b/);
     if (!date && mDate) date = mDate[1];
     if (!slot && mSlot) slot = mSlot[1];
   }
   return { date, slot };
 }
 
-// === Conteggio tipi dalle PROPERTIES (fallback se servisse)
 function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
   let used = false;
@@ -104,10 +103,10 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
     if (valHas(v, R_DISAB)) { inc('Disabilità'); continue; }
     if (valHas(v, R_UNICO)) { inc('Unico'); continue; }
 
-    if (keyHas(k, R_ADULTO)) { const m = v.match(/\\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Adulto', n); continue; }
-    if (keyHas(k, R_BAMBINO)) { const m = v.match(/\\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Bambino', n); continue; }
-    if (keyHas(k, R_DISAB)) { const m = v.match(/\\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Disabilità', n); continue; }
-    if (keyHas(k, R_UNICO)) { const m = v.match(/\\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Unico', n); continue; }
+    if (keyHas(k, R_ADULTO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Adulto', n); continue; }
+    if (keyHas(k, R_BAMBINO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Bambino', n); continue; }
+    if (keyHas(k, R_DISAB)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Disabilità', n); continue; }
+    if (keyHas(k, R_UNICO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Unico', n); continue; }
 
     if (keyHas(k, R_TIPO_FIELD) && v) {
       let t = 'Sconosciuto';
@@ -119,14 +118,56 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
       continue;
     }
 
-    if (/\\d+/.test(v) && /(persone|persona|qty|quantita|quantità|pezzi)/.test(k)) {
-      const n = parseInt(v.match(/\\d+/)![0], 10);
+    if (/\d+/.test(v) && /(persone|persona|qty|quantita|quantità|pezzi)/.test(k)) {
+      const n = parseInt(v.match(/\d+/)![0], 10);
       if (n > 0) inc('Unico', n);
     }
   }
 
   const total = counts.Adulto + counts.Bambino + counts.Disabilità + counts.Unico + counts.Sconosciuto;
   return { counts, total, used };
+}
+
+// === Utils backfill ===
+function asUTCStart(dateStr: string) { return `${dateStr}T00:00:00Z`; }
+function asUTCEnd(dateStr: string)   { return `${dateStr}T23:59:59Z`; }
+
+// == FETCH (normale)
+async function fetchOrdersInRange(minISO: string, maxISO: string) {
+  const shop = process.env.SHOP_DOMAIN!;
+  const token = process.env.ADMIN_ACCESS_TOKEN!;
+  const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
+  const orders: any[] = [];
+  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,line_items`;
+  while (nextUrl) {
+    const resp = await fetch(nextUrl, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }});
+    if (!resp.ok) { const text = await resp.text(); throw new Error(`Shopify ${resp.status}: ${text}`); }
+    const data = await resp.json();
+    orders.push(...(data.orders || []));
+    const link = resp.headers.get('link') || '';
+    const m = link.match(/<([^>]+)>;\s*rel="next"/i);
+    nextUrl = m ? m[1] : '';
+  }
+  return orders;
+}
+
+// == FETCH (diagnostico: NIENTE fields => line_items completi)
+async function fetchOrdersInRangeFull(minISO: string, maxISO: string) {
+  const shop = process.env.SHOP_DOMAIN!;
+  const token = process.env.ADMIN_ACCESS_TOKEN!;
+  const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
+  const orders: any[] = [];
+  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc`;
+  while (nextUrl) {
+    const resp = await fetch(nextUrl, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }});
+    if (!resp.ok) { const text = await resp.text(); throw new Error(`Shopify ${resp.status}: ${text}`); }
+    const data = await resp.json();
+    orders.push(...(data.orders || []));
+    const link = resp.headers.get('link') || '';
+    const m = link.match(/<([^>]+)>;\s*rel="next"/i);
+    nextUrl = m ? m[1] : '';
+  }
+  return orders;
 }
 
 // === Trasforma un ordine in righe aggregate ===
@@ -158,10 +199,7 @@ function collectRowsFromOrder(order: any) {
     const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
     const { date, slot } = extractDateSlot(li);
 
-    // 1) Prova properties
     const viaProps = countTypesFromProperties(li);
-
-    // 2) Se niente in properties, usa variante/titolo/SKU * quantity
     if (!viaProps.used) {
       const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
       let t = normTicketType(source);
@@ -182,7 +220,7 @@ function collectRowsFromOrder(order: any) {
     }
     const b = buckets.get(key)!;
 
-    const addQty = viaProps.used ? (viaProps.total || Number(li.quantity || 0)) : Number(li.quantity || 0);
+    const addQty = (viaProps.total || Number(li.quantity || 0));
     b.qtyTotal += addQty;
     b.counts.Adulto      += viaProps.counts.Adulto;
     b.counts.Bambino     += viaProps.counts.Bambino;
@@ -205,54 +243,10 @@ function collectRowsFromOrder(order: any) {
       b.createdAt, b.orderName, b.orderId, b.customerName, b.customerEmail,
       b.event, b.date, b.slot,
       mix, b.counts.Adulto, b.counts.Bambino, b.counts.Disabilità, b.counts.Unico, b.counts.Sconosciuto, b.qtyTotal,
-      totalGross, currency, payGws, processedAt,
+      b.totalGross, b.currency, b.payGws, b.processedAt,
     ]);
   }
   return rows;
-}
-
-// === Utils backfill ===
-function asUTCStart(dateStr: string) { return `${dateStr}T00:00:00Z`; }
-function asUTCEnd(dateStr: string)   { return `${dateStr}T23:59:59Z`; }
-
-// == FETCH (normale: con fields limitati)
-async function fetchOrdersInRange(minISO: string, maxISO: string) {
-  const shop = process.env.SHOP_DOMAIN!;
-  const token = process.env.ADMIN_ACCESS_TOKEN!;
-  const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
-  const orders: any[] = [];
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,line_items`;
-
-  while (nextUrl) {
-    const resp = await fetch(nextUrl, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }});
-    if (!resp.ok) { const text = await resp.text(); throw new Error(`Shopify ${resp.status}: ${text}`); }
-    const data = await resp.json();
-    orders.push(...(data.orders || []));
-    const link = resp.headers.get('link') || '';
-    const m = link.match(/<([^>]+)>;\\s*rel="next"/i);
-    nextUrl = m ? m[1] : '';
-  }
-  return orders;
-}
-
-// == FETCH (diagnostico: NIENTE fields => line_items completi)
-async function fetchOrdersInRangeFull(minISO: string, maxISO: string) {
-  const shop = process.env.SHOP_DOMAIN!;
-  const token = process.env.ADMIN_ACCESS_TOKEN!;
-  const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
-  const orders: any[] = [];
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc`;
-
-  while (nextUrl) {
-    const resp = await fetch(nextUrl, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }});
-    if (!resp.ok) { const text = await resp.text(); throw new Error(`Shopify ${resp.status}: ${text}`); }
-    const data = await resp.json();
-    orders.push(...(data.orders || []));
-    const link = resp.headers.get('link') || '';
-    const m = link.match(/<([^>]+)>;\\s*rel="next"/i);
-    nextUrl = m ? m[1] : '';
-  }
-  return orders;
 }
 
 // === Handler ===
@@ -272,10 +266,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const debug = String(q.debug || '').toLowerCase();
     const filterOrderName = String(q.orderName || '');
 
-    if (!since || !/^\\d{4}-\\d{2}-\\d{2}$/.test(since)) {
+    // <<< NOVITÀ: debug=q PRIMA DI QUALSIASI VALIDAZIONE >>>
+    if (debug === 'q') {
+      return res.status(200).json({
+        ok: true,
+        debug: 'q',
+        query: q,
+        rawUrl: req.url,
+      });
+    }
+
+    if (!since || !/^\d{4}-\d{2}-\d{2}$/.test(since)) {
       return res.status(400).json({ ok: false, error: 'Parametro "since" richiesto. Formato: YYYY-MM-DD' });
     }
-    if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(until)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(until)) {
       return res.status(400).json({ ok: false, error: 'Parametro "until" non valido. Formato: YYYY-MM-DD' });
     }
 
@@ -285,13 +289,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // Modalità diagnostica: line_items raw COMPLETI
     if (debug === 'li') {
       let orders = await fetchOrdersInRangeFull(minISO, maxISO);
-      if (filterOrderName) orders = orders.filter(o => String(o.name) === filterOrderName);
-      const dbg = orders.slice(0, 3).map(o => ({
+      if (filterOrderName) orders = orders.filter((o: any) => String(o.name) === filterOrderName);
+      const dbg = orders.slice(0, 3).map((o: any) => ({
         orderName: o.name,
         orderId: o.id,
         created_at: o.created_at,
         line_items: (Array.isArray(o.line_items) ? o.line_items : []).map((li: any) => {
-          // includiamo un sottoinsieme ampio di campi, più eventuali campi "bundle_*"
           const out: any = {
             id: li.id,
             title: li.title,
@@ -302,7 +305,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             quantity: li.quantity,
             properties: li.properties,
           };
-          // se esistono campi bundle noti, includili
           if (li.bundle_parent !== undefined) out.bundle_parent = li.bundle_parent;
           if (li.bundle_components !== undefined) out.bundle_components = li.bundle_components;
           if (li.components !== undefined) out.components = li.components;
@@ -316,7 +318,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // Flusso normale
     let orders = await fetchOrdersInRange(minISO, maxISO);
-    if (filterOrderName) orders = orders.filter(o => String(o.name) === filterOrderName);
+    if (filterOrderName) orders = orders.filter((o: any) => String(o.name) === filterOrderName);
 
     const rowsAll: any[][] = [];
     for (const order of orders) {
