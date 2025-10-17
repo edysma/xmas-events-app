@@ -76,9 +76,10 @@ function extractDateSlot(li: any) {
 }
 
 // === Conteggio tipi dalle PROPERTIES (nuovi ordini) ===
-function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
+function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean; sawHandicapHint: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
   let used = false;
+  let sawHandicapHint = false;
 
   const props = Array.isArray(li.properties) ? li.properties : [];
   const entries = props.map((p: any) => ({
@@ -87,40 +88,40 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
   }));
 
   const inc = (label: keyof Counts, n = 1) => { (counts as any)[label] += n; used = true; };
-
-  const keyHas = (k: string, frag: RegExp) => frag.test(k);
-  const valHas = (v: string, frag: RegExp) => frag.test(v);
+  const has = (s: string, re: RegExp) => re.test(s);
 
   const R_ADULTO = /adult/;
   const R_BAMBINO = /(bambin|child|kid)/;
-  const R_DISAB = /(disab|handicap|invalid)/;
-  const R_UNICO = /(unico|unique|singol)/;
+  const R_DISAB   = /(disab|handicap|invalid)/;
+  const R_UNICO   = /(unico|unique|singol)/;
   const R_TIPO_FIELD = /(tipo|tipologia|tariffa|ticket|categoria|bigliett|ingresso|label)/;
 
   for (const { k, v } of entries) {
-    if (valHas(v, R_ADULTO)) { inc('Adulto'); continue; }
-    if (valHas(v, R_BAMBINO)) { inc('Bambino'); continue; }
-    if (valHas(v, R_DISAB)) { inc('Disabilità'); continue; }
-    if (valHas(v, R_UNICO)) { inc('Unico'); continue; }
+    if (has(v, R_DISAB) || has(k, R_DISAB)) sawHandicapHint = true;
 
-    if (keyHas(k, R_ADULTO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Adulto', n); continue; }
-    if (keyHas(k, R_BAMBINO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Bambino', n); continue; }
-    if (keyHas(k, R_DISAB)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Disabilità', n); continue; }
-    if (keyHas(k, R_UNICO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Unico', n); continue; }
+    if (has(v, R_ADULTO)) { inc('Adulto'); continue; }
+    if (has(v, R_BAMBINO)) { inc('Bambino'); continue; }
+    if (has(v, R_DISAB))   { inc('Disabilità'); continue; }
+    if (has(v, R_UNICO))   { inc('Unico'); continue; }
 
-    if (keyHas(k, R_TIPO_FIELD) && v) {
+    if (has(k, R_ADULTO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Adulto', n); continue; }
+    if (has(k, R_BAMBINO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Bambino', n); continue; }
+    if (has(k, R_DISAB))   { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Disabilità', n); continue; }
+    if (has(k, R_UNICO))   { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Unico', n); continue; }
+
+    if (has(k, R_TIPO_FIELD) && v) {
       let t = 'Sconosciuto';
       if (R_ADULTO.test(v)) t = 'Adulto';
       else if (R_BAMBINO.test(v)) t = 'Bambino';
-      else if (R_DISAB.test(v)) t = 'Disabilità';
-      else if (R_UNICO.test(v)) t = 'Unico';
+      else if (R_DISAB.test(v))   t = 'Disabilità';
+      else if (R_UNICO.test(v))   t = 'Unico';
       inc(t as keyof Counts);
       continue;
     }
   }
 
   const total = counts.Adulto + counts.Bambino + counts.Disabilità + counts.Unico + counts.Sconosciuto;
-  return { counts, total, used };
+  return { counts, total, used, sawHandicapHint };
 }
 
 // === Parser del riepilogo in note_attributes["_Riepilogo biglietti"] ===
@@ -191,21 +192,29 @@ function guessEventFromOrder(order: any, orderTags: string[]) {
   return 'Sconosciuto';
 }
 
-// === Nome+Email con fallback (customer -> billing -> shipping) ===
-function getCustomerName(order: any) {
-  const fromCustomer = order?.customer ? `${safeString(order.customer.first_name)} ${safeString(order.customer.last_name)}`.trim() : '';
-  if (fromCustomer) return fromCustomer;
+// === FALLBACK: classificazione da PREZZO (9€=Bambino; 11€=Adulto o Disabilità)
+// NB: Disabilità richiede UN INDIZIO (titolo/proprietà) per distinguerla da Adulto; altrimenti 11€ = Adulto
+function classifyFromPrice(li: any, sawHandicapHint: boolean): { counts: Counts; totalPeople: number; used: boolean } {
+  const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
+  const qty = Number(li.quantity || 0);
+  const priceStr = String(li.price || li.price_set?.shop_money?.amount || '').replace(',', '.').trim();
+  const price = parseFloat(priceStr);
+  if (!qty || isNaN(price)) return { counts, totalPeople: 0, used: false };
 
-  const b = order?.billing_address;
-  if (b && (b.first_name || b.last_name)) return `${safeString(b.first_name)} ${safeString(b.last_name)}`.trim();
-
-  const s = order?.shipping_address;
-  if (s && (s.first_name || s.last_name)) return `${safeString(s.first_name)} ${safeString(s.last_name)}`.trim();
-
-  return '';
-}
-function getCustomerEmail(order: any) {
-  return safeString(order?.email || order?.contact_email || order?.customer?.email || '');
+  if (Math.abs(price - 9) < 0.001) {
+    counts.Bambino += qty;
+    return { counts, totalPeople: qty, used: true };
+  }
+  if (Math.abs(price - 11) < 0.001) {
+    if (sawHandicapHint) {
+      counts.Disabilità += qty;                // numero di biglietti Handicap acquistati
+      return { counts, totalPeople: qty * 2, used: true }; // ma “persone” sono ×2
+    } else {
+      counts.Adulto += qty;
+      return { counts, totalPeople: qty, used: true };
+    }
+  }
+  return { counts, totalPeople: qty, used: false }; // sconosciuto: non usato
 }
 
 // == FETCH
@@ -217,7 +226,6 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const token = process.env.ADMIN_ACCESS_TOKEN!;
   const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
   const orders: any[] = [];
-  // includiamo anche PII (verrà vuoto se lo store non ha l'accesso PII)
   let nextUrl =
     `${base}?status=any&limit=250` +
     `&created_at_min=${encodeURIComponent(minISO)}` +
@@ -238,13 +246,27 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   return orders;
 }
 
-// === Trasforma un ordine in righe aggregate (usa summary note se presente) ===
+// === Nome+Email con fallback (non avremo PII sul piano attuale; resteranno vuoti) ===
+function getCustomerName(order: any) {
+  const fromCustomer = order?.customer ? `${safeString(order.customer.first_name)} ${safeString(order.customer.last_name)}`.trim() : '';
+  if (fromCustomer) return fromCustomer;
+  const b = order?.billing_address;
+  if (b && (b.first_name || b.last_name)) return `${safeString(b.first_name)} ${safeString(b.last_name)}`.trim();
+  const s = order?.shipping_address;
+  if (s && (s.first_name || s.last_name)) return `${safeString(s.first_name)} ${safeString(s.last_name)}`.trim();
+  return '';
+}
+function getCustomerEmail(order: any) {
+  return safeString(order?.email || order?.contact_email || order?.customer?.email || '');
+}
+
+// === Trasforma un ordine in righe aggregate (note → properties → prezzo) ===
 function collectRowsFromOrder(order: any) {
   const buckets = new Map<string, {
     createdAt: string; orderName: string; orderId: string;
     customerName: string; customerEmail: string;
     event: string; date: string; slot: string;
-    counts: Counts; qtyTotal: number;
+    counts: Counts; qtyTotal: number; // persone totali (NB: Disabilità conta ×2)
     totalGross: number; currency: string; payGws: string; processedAt: string;
   }>();
 
@@ -275,11 +297,11 @@ function collectRowsFromOrder(order: any) {
           createdAt, orderName, orderId, customerName, customerEmail,
           event: eventGuess, date, slot,
           counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
-          qtyTotal: 0,
-          totalGross, currency, payGws, processedAt,
+          qtyTotal: 0, totalGross, currency, payGws, processedAt,
         });
       }
       const b = buckets.get(key)!;
+      // NB: Disabilità NON va “×2” nel riepilogo: il riepilogo contiene già i numeri corretti per persona
       const sum = e.counts.Adulto + e.counts.Bambino + e.counts.Disabilità + e.counts.Unico + e.counts.Sconosciuto;
       b.qtyTotal += sum;
       b.counts.Adulto      += e.counts.Adulto;
@@ -289,7 +311,7 @@ function collectRowsFromOrder(order: any) {
       b.counts.Sconosciuto += e.counts.Sconosciuto;
     }
   } else {
-    // 1) Altrimenti properties -> fallback titolo/SKU
+    // 1) Properties → 2) Fallback: prezzo (9=bimbo; 11=adulto/handicap con hint)
     for (const li of lineItems) {
       if (li.gift_card === true) continue;
 
@@ -297,12 +319,35 @@ function collectRowsFromOrder(order: any) {
       const { date, slot } = extractDateSlot(li);
 
       const viaProps = countTypesFromProperties(li);
+      const sawHandicapHint =
+        viaProps.sawHandicapHint ||
+        /(disab|handicap|invalid)/i.test(String(li.title || '')) ||
+        /(disab|handicap|invalid)/i.test(String(li.name || ''));
+
+      // Se le properties non hanno classificato niente, prova il prezzo
+      let usedPeople = 0;
       if (!viaProps.used) {
+        const byPrice = classifyFromPrice(li, sawHandicapHint);
+        if (byPrice.used) {
+          // trasferisci i contatori derivati dal prezzo (Disabilità vale ×2 nella qtyTotal)
+          viaProps.counts.Adulto      += byPrice.counts.Adulto;
+          viaProps.counts.Bambino     += byPrice.counts.Bambino;
+          viaProps.counts.Disabilità  += byPrice.counts.Disabilità;
+          viaProps.counts.Unico       += byPrice.counts.Unico;
+          viaProps.counts.Sconosciuto += byPrice.counts.Sconosciuto;
+          usedPeople = byPrice.totalPeople;
+        }
+      }
+
+      // Se ancora niente, ultimo fallback: deduci dal testo e conta come 1:1
+      if (!viaProps.used && usedPeople === 0) {
         const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
         let t = normTicketType(source);
-        if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
+        if (t.toLowerCase().includes('handicap') || t.toLowerCase().includes('disab')) t = 'Disabilità';
         if (t === 'Sconosciuto') t = 'Unico';
         (viaProps.counts as any)[t] += Number(li.quantity || 0);
+        usedPeople = Number(li.quantity || 0);
+        // NB: se qui fosse davvero Disabilità, non sappiamo “×2” senza hint ⇒ resterà 1:1
       }
 
       const key = [orderId, event, date, slot].join('||');
@@ -311,14 +356,15 @@ function collectRowsFromOrder(order: any) {
           createdAt, orderName, orderId, customerName, customerEmail,
           event, date, slot,
           counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
-          qtyTotal: 0,
-          totalGross, currency, payGws, processedAt,
+          qtyTotal: 0, totalGross, currency, payGws, processedAt,
         });
       }
       const b = buckets.get(key)!;
 
-      const addQty = viaProps.used ? (viaProps.total || Number(li.quantity || 0)) : Number(li.quantity || 0);
-      b.qtyTotal += addQty;
+      // qtyTotal: somma persone (Disabilità già “×2” se siamo passati dal prezzo con hint)
+      const addPeople = usedPeople || Number(li.quantity || 0);
+      b.qtyTotal += addPeople;
+
       b.counts.Adulto      += viaProps.counts.Adulto;
       b.counts.Bambino     += viaProps.counts.Bambino;
       b.counts.Disabilità  += viaProps.counts.Disabilità;
@@ -374,31 +420,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const minISO = asUTCStart(since);
     const maxISO = asUTCEnd(until);
 
-    // 1) Scarica ordini (con customer/billing/shipping/email)
+    // 1) Scarica ordini
     let orders = await fetchOrdersInRange(minISO, maxISO);
     if (filterOrderName) orders = orders.filter((o: any) => String(o.name) === filterOrderName);
 
-    // Diagnostica: chi è stato popolato e da dove
-    if (debug === 'who') {
-      const who = orders.map((o: any) => {
-        const fromCustomer = o?.customer && (o.customer.first_name || o.customer.last_name);
-        const fromBilling = o?.billing_address && (o.billing_address.first_name || o.billing_address.last_name);
-        const fromShipping = o?.shipping_address && (o.shipping_address.first_name || o.shipping_address.last_name);
-        return {
-          orderName: o.name,
-          has_customer_obj: Boolean(fromCustomer),
-          has_billing_name: Boolean(fromBilling),
-          has_shipping_name: Boolean(fromShipping),
-          email_sources: {
-            order_email: Boolean(o?.email),
-            contact_email: Boolean(o?.contact_email),
-            customer_email: Boolean(o?.customer?.email),
-          },
-          resolved_name: getCustomerName(o),
-          resolved_email: getCustomerEmail(o),
-        };
-      });
-      return res.status(200).json({ ok: true, debug: 'who', since, until, orders_count: orders.length, who: who.slice(0, 25) });
+    // Diagnostiche già presenti (notes / notesparse / li / who / prices) — le manteniamo
+    if (debug === 'prices') {
+      const out: Record<string, Record<string, { qty: number, examples: string[] }>> = {};
+      for (const o of orders) {
+        const orderTags = (o.tags || '').split(',').map((t: string) => t.trim()).filter(Boolean);
+        for (const li of (o.line_items || [])) {
+          if (li.gift_card === true) continue;
+          const event = pickEventFrom(String(li.title||''), String(li.product_title||''), orderTags);
+          const price = String(li.price || li.price_set?.shop_money?.amount || '').trim();
+          if (!price) continue;
+          out[event] = out[event] || {};
+          out[event][price] = out[event][price] || { qty: 0, examples: [] };
+          out[event][price].qty += Number(li.quantity || 0);
+          if (out[event][price].examples.length < 5) out[event][price].examples.push(String(o.name));
+        }
+      }
+      return res.status(200).json({ ok: true, debug: 'prices', since, until, events: out });
     }
 
     // 2) Trasforma -> righe
