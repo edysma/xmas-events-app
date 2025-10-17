@@ -76,7 +76,7 @@ function extractDateSlot(li: any) {
   return { date, slot };
 }
 
-// === Nuovo: conteggio tipi robusto dalle PROPERTIES ===
+// === Nuovo: conteggio tipi dalle PROPERTIES ===
 function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
   let used = false;
@@ -99,32 +99,20 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
   const R_UNICO = /(unico|unique|singol)/;
   const R_TIPO_FIELD = /(tipo|tipologia|tariffa|ticket|categoria|bigliett)/;
 
-  for (const { k, v, rawV } of entries) {
-    // 1) Se il VALORE contiene adulto/bambino/... -> +1 per persona
+  for (const { k, v } of entries) {
+    // 1) Valore contiene il tipo -> +1 per persona
     if (valHas(v, R_ADULTO)) { inc('Adulto'); continue; }
     if (valHas(v, R_BAMBINO)) { inc('Bambino'); continue; }
     if (valHas(v, R_DISAB)) { inc('Disabilità'); continue; }
     if (valHas(v, R_UNICO)) { inc('Unico'); continue; }
 
-    // 2) Se il NOME contiene adulto/bambino/... usa numero nel valore (o bool=1)
-    if (keyHas(k, R_ADULTO)) {
-      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
-      if (n > 0) inc('Adulto', n); continue;
-    }
-    if (keyHas(k, R_BAMBINO)) {
-      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
-      if (n > 0) inc('Bambino', n); continue;
-    }
-    if (keyHas(k, R_DISAB)) {
-      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
-      if (n > 0) inc('Disabilità', n); continue;
-    }
-    if (keyHas(k, R_UNICO)) {
-      const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (v === 'true' || v === 'si' || v === 'sì' || v === 'yes' ? 1 : 0);
-      if (n > 0) inc('Unico', n); continue;
-    }
+    // 2) Nome campo è il tipo (con numero) -> usa numero nel valore o booleano
+    if (keyHas(k, R_ADULTO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Adulto', n); continue; }
+    if (keyHas(k, R_BAMBINO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Bambino', n); continue; }
+    if (keyHas(k, R_DISAB)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Disabilità', n); continue; }
+    if (keyHas(k, R_UNICO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Unico', n); continue; }
 
-    // 3) Campi "Tipo/Tipologia/Ticket/..." (anche "Tipo 1", "Tipologia 2", "Tipo biglietto 1")
+    // 3) Campi "Tipo/Tipologia/Ticket/..." (anche "Tipo 1", "Tipo biglietto 1")
     if (keyHas(k, R_TIPO_FIELD) && v) {
       let t = 'Sconosciuto';
       if (R_ADULTO.test(v)) t = 'Adulto';
@@ -135,7 +123,7 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
       continue;
     }
 
-    // 4) Ultima spiaggia: se valore è un numero e il nome contiene "persone" o "qty", mettilo in Unico
+    // 4) Ultima spiaggia: valore numerico su chiavi generiche -> metti in Unico
     if (/\d+/.test(v) && /(persone|persona|qty|quantita|quantità|pezzi)/.test(k)) {
       const n = parseInt(v.match(/\d+/)![0], 10);
       if (n > 0) inc('Unico', n);
@@ -178,7 +166,7 @@ function collectRowsFromOrder(order: any) {
     // 1) Prova a contare dalle properties (per-persona o numeriche)
     const viaProps = countTypesFromProperties(li);
 
-    // 2) Se nada nelle properties, usa variante/titolo/SKU * quantity
+    // 2) Se nulla nelle properties, usa variante/titolo/SKU * quantity
     if (!viaProps.used) {
       const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
       let t = normTicketType(source);
@@ -238,7 +226,7 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
 
   const orders: any[] = [];
-  // campi essenziali (line_items contiene title, variant_title, sku, properties, quantity)
+  // campi essenziali (line_items include title, variant_title, sku, properties, quantity)
   let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,line_items`;
 
   while (nextUrl) {
@@ -279,6 +267,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const since = String(q.since || '').trim(); // YYYY-MM-DD (obbligatorio)
     const until = String(q.until || '').trim() || new Date().toISOString().slice(0,10); // YYYY-MM-DD (default: oggi)
     const dryRun = String(q.dryRun || '') === '1';
+    const debug = String(q.debug || '').toLowerCase();
+    const filterOrderName = String(q.orderName || '');
 
     if (!since || !/^\d{4}-\d{2}-\d{2}$/.test(since)) {
       return res.status(400).json({ ok: false, error: 'Parametro "since" richiesto. Formato: YYYY-MM-DD' });
@@ -291,7 +281,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const maxISO = asUTCEnd(until);
 
     // 1) Scarica ordini
-    const orders = await fetchOrdersInRange(minISO, maxISO);
+    let orders = await fetchOrdersInRange(minISO, maxISO);
+    if (filterOrderName) {
+      orders = orders.filter(o => String(o.name) === filterOrderName);
+    }
+
+    // === MODALITÀ DIAGNOSTICA: mostra le properties dei line item ===
+    if (debug === 'props') {
+      const dbg = orders.slice(0, 5).map(o => ({
+        orderName: o.name,
+        orderId: o.id,
+        created_at: o.created_at,
+        line_items: (Array.isArray(o.line_items) ? o.line_items : []).map((li: any) => ({
+          title: li.title,
+          variant_title: li.variant_title,
+          sku: li.sku,
+          quantity: li.quantity,
+          properties: (Array.isArray(li.properties) ? li.properties : []).map((p: any) => ({
+            name: p?.name,
+            value: p?.value
+          })),
+        })),
+      }));
+      return res.status(200).json({ ok: true, debug: 'props', since, until, orders_count: orders.length, orders: dbg });
+    }
 
     // 2) Trasforma -> righe
     const rowsAll: any[][] = [];
