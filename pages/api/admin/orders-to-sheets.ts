@@ -9,10 +9,20 @@ const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 // ---------- Google Sheets client ----------
 function getSheetsClient() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!;
-  const key = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!;
+  let key = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!;
+
+  // Normalizza la chiave: toglie eventuali \r, converte "\n" letterali in a-capo reali
+  key = key.replace(/\\n/g, '\n').replace(/\r/g, '').trim();
+
+  // (controllo veloce: se manca l'header/footer tipici, meglio fermarsi con un errore chiaro)
+  if (!key.startsWith('-----BEGIN PRIVATE KEY-----') || !key.endsWith('-----END PRIVATE KEY-----')) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY non sembra in formato PEM valido (BEGIN/END).');
+  }
+
   const jwt = new google.auth.JWT({ email, key, scopes: SCOPES });
   return google.sheets({ version: 'v4', auth: jwt });
 }
+
 
 async function appendRowsToSheet(rows: any[][]) {
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID!;
