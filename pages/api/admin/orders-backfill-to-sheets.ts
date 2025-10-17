@@ -4,7 +4,7 @@ import { google } from 'googleapis';
 
 // === Config ===
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-const API_VERSION = '2023-10'; // ok per backfill
+const API_VERSION = '2024-10';
 
 // === Tipi ===
 type Counts = { Adulto: number; Bambino: number; Disabilità: number; Unico: number; Sconosciuto: number };
