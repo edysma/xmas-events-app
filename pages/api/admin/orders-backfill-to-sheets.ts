@@ -151,7 +151,6 @@ function parseNoteSummary(text: string) {
       const right = arrow.slice(1).join('→').trim();
 
       let event = '';
-      // se c'è un " — " all'inizio, prendi la parte prima come evento
       const partEvt = left.split('—')[0]?.trim();
       if (partEvt && /wondy|fanta/i.test(partEvt)) event = partEvt;
 
@@ -174,7 +173,6 @@ function parseNoteSummary(text: string) {
   if (!entries.length && lines.length) {
     entries.push({ counts: countFromFragment(lines[lines.length - 1]) });
   }
-
   return entries;
 }
 
@@ -193,6 +191,23 @@ function guessEventFromOrder(order: any, orderTags: string[]) {
   return 'Sconosciuto';
 }
 
+// === Nome+Email con fallback (customer -> billing -> shipping) ===
+function getCustomerName(order: any) {
+  const fromCustomer = order?.customer ? `${safeString(order.customer.first_name)} ${safeString(order.customer.last_name)}`.trim() : '';
+  if (fromCustomer) return fromCustomer;
+
+  const b = order?.billing_address;
+  if (b && (b.first_name || b.last_name)) return `${safeString(b.first_name)} ${safeString(b.last_name)}`.trim();
+
+  const s = order?.shipping_address;
+  if (s && (s.first_name || s.last_name)) return `${safeString(s.first_name)} ${safeString(s.last_name)}`.trim();
+
+  return '';
+}
+function getCustomerEmail(order: any) {
+  return safeString(order?.email || order?.contact_email || order?.customer?.email || '');
+}
+
 // == FETCH
 function asUTCStart(dateStr: string) { return `${dateStr}T00:00:00Z`; }
 function asUTCEnd(dateStr: string)   { return `${dateStr}T23:59:59Z`; }
@@ -202,7 +217,15 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const token = process.env.ADMIN_ACCESS_TOKEN!;
   const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
   const orders: any[] = [];
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,note_attributes,line_items`;
+  // includiamo anche PII (verrà vuoto se lo store non ha l'accesso PII)
+  let nextUrl =
+    `${base}?status=any&limit=250` +
+    `&created_at_min=${encodeURIComponent(minISO)}` +
+    `&created_at_max=${encodeURIComponent(maxISO)}` +
+    `&order=created_at+asc` +
+    `&fields=id,name,created_at,processed_at,email,contact_email,tags,financial_status,fulfillment_status,customer,` +
+    `shipping_address,billing_address,` +
+    `currency,total_price,payment_gateway_names,note_attributes,line_items`;
   while (nextUrl) {
     const resp = await fetch(nextUrl, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }});
     if (!resp.ok) { const text = await resp.text(); throw new Error(`Shopify ${resp.status}: ${text}`); }
@@ -215,7 +238,7 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   return orders;
 }
 
-// === Trasforma un ordine in righe aggregate (ora usa le note se presenti) ===
+// === Trasforma un ordine in righe aggregate (usa summary note se presente) ===
 function collectRowsFromOrder(order: any) {
   const buckets = new Map<string, {
     createdAt: string; orderName: string; orderId: string;
@@ -229,8 +252,8 @@ function collectRowsFromOrder(order: any) {
   const processedAt = toRomeISO(order.processed_at);
   const orderName = safeString(order.name);
   const orderId = safeString(order.id);
-  const customerName = order?.customer ? `${safeString(order.customer.first_name)} ${safeString(order.customer.last_name)}`.trim() : '';
-  const customerEmail = safeString(order?.email || order?.contact_email);
+  const customerName = getCustomerName(order);
+  const customerEmail = getCustomerEmail(order);
   const currency = safeString(order.currency);
   const totalGross = Number(order.total_price ?? 0);
   const payGws = Array.isArray(order.payment_gateway_names) ? order.payment_gateway_names.join(',') : '';
@@ -238,7 +261,7 @@ function collectRowsFromOrder(order: any) {
   const orderTags = (order.tags || '').split(',').map((t: string) => t.trim()).filter(Boolean);
   const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
 
-  // 0) Se c'è un riepilogo in note, lo usiamo come SORGENTE PRINCIPALE e NON contiamo i line items
+  // 0) Riepilogo in note = fonte primaria
   const notesEntries = getNoteSummaryEntries(order);
   if (notesEntries.length) {
     const eventGuess = guessEventFromOrder(order, orderTags);
@@ -265,63 +288,43 @@ function collectRowsFromOrder(order: any) {
       b.counts.Unico       += e.counts.Unico;
       b.counts.Sconosciuto += e.counts.Sconosciuto;
     }
+  } else {
+    // 1) Altrimenti properties -> fallback titolo/SKU
+    for (const li of lineItems) {
+      if (li.gift_card === true) continue;
 
-    // produce le righe e chiude
-    const rows: any[][] = [];
-    for (const b of buckets.values()) {
-      const mix = [
-        `Adulto | ${b.counts.Adulto}`,
-        `Bambino | ${b.counts.Bambino}`,
-        `Disabilità | ${b.counts.Disabilità}`,
-        `Unico | ${b.counts.Unico}`,
-        `Sconosciuto | ${b.counts.Sconosciuto}`
-      ].join(', ');
+      const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
+      const { date, slot } = extractDateSlot(li);
 
-      rows.push([
-        b.createdAt, b.orderName, b.orderId, b.customerName, b.customerEmail,
-        b.event, b.date, b.slot,
-        mix, b.counts.Adulto, b.counts.Bambino, b.counts.Disabilità, b.counts.Unico, b.counts.Sconosciuto, b.qtyTotal,
-        b.totalGross, b.currency, b.payGws, b.processedAt,
-      ]);
+      const viaProps = countTypesFromProperties(li);
+      if (!viaProps.used) {
+        const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
+        let t = normTicketType(source);
+        if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
+        if (t === 'Sconosciuto') t = 'Unico';
+        (viaProps.counts as any)[t] += Number(li.quantity || 0);
+      }
+
+      const key = [orderId, event, date, slot].join('||');
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          createdAt, orderName, orderId, customerName, customerEmail,
+          event, date, slot,
+          counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
+          qtyTotal: 0,
+          totalGross, currency, payGws, processedAt,
+        });
+      }
+      const b = buckets.get(key)!;
+
+      const addQty = viaProps.used ? (viaProps.total || Number(li.quantity || 0)) : Number(li.quantity || 0);
+      b.qtyTotal += addQty;
+      b.counts.Adulto      += viaProps.counts.Adulto;
+      b.counts.Bambino     += viaProps.counts.Bambino;
+      b.counts.Disabilità  += viaProps.counts.Disabilità;
+      b.counts.Unico       += viaProps.counts.Unico;
+      b.counts.Sconosciuto += viaProps.counts.Sconosciuto;
     }
-    return rows;
-  }
-
-  // 1) Altrimenti contiamo dai line items (properties → fallback titolo/SKU)
-  for (const li of lineItems) {
-    if (li.gift_card === true) continue;
-
-    const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
-    const { date, slot } = extractDateSlot(li);
-
-    const viaProps = countTypesFromProperties(li);
-    if (!viaProps.used) {
-      const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
-      let t = normTicketType(source);
-      if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
-      if (t === 'Sconosciuto') t = 'Unico';
-      (viaProps.counts as any)[t] += Number(li.quantity || 0);
-    }
-
-    const key = [orderId, event, date, slot].join('||');
-    if (!buckets.has(key)) {
-      buckets.set(key, {
-        createdAt, orderName, orderId, customerName, customerEmail,
-        event, date, slot,
-        counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
-        qtyTotal: 0,
-        totalGross, currency, payGws, processedAt,
-      });
-    }
-    const b = buckets.get(key)!;
-
-    const addQty = viaProps.used ? (viaProps.total || Number(li.quantity || 0)) : Number(li.quantity || 0);
-    b.qtyTotal += addQty;
-    b.counts.Adulto      += viaProps.counts.Adulto;
-    b.counts.Bambino     += viaProps.counts.Bambino;
-    b.counts.Disabilità  += viaProps.counts.Disabilità;
-    b.counts.Unico       += viaProps.counts.Unico;
-    b.counts.Sconosciuto += viaProps.counts.Sconosciuto;
   }
 
   const rows: any[][] = [];
@@ -371,38 +374,41 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const minISO = asUTCStart(since);
     const maxISO = asUTCEnd(until);
 
+    // 1) Scarica ordini (con customer/billing/shipping/email)
     let orders = await fetchOrdersInRange(minISO, maxISO);
     if (filterOrderName) orders = orders.filter((o: any) => String(o.name) === filterOrderName);
 
-    // diagnostica già presente (notes, notesparse, li, q) — opzionale: lasciamo invariata
-    if (debug === 'notes') {
-      const dbg = orders.slice(0, 5).map((o: any) => ({
-        orderName: o.name,
-        orderId: o.id,
-        created_at: o.created_at,
-        note_attributes: Array.isArray(o.note_attributes)
-          ? o.note_attributes.map((na: any) => ({ name: na?.name, value: na?.value }))
-          : [],
-      }));
-      return res.status(200).json({ ok: true, debug: 'notes', since, until, orders_count: orders.length, orders: dbg });
-    }
-    if (debug === 'notesparse') {
-      const out = orders.map((o: any) => {
-        const parsed = getNoteSummaryEntries(o);
-        const entry = Array.isArray(o.note_attributes) ? o.note_attributes.find((n: any) => String(n?.name).trim().toLowerCase() === '_riepilogo biglietti') : null;
-        return { orderName: o.name, has_summary: Boolean(entry), parsed, raw_summary: entry?.value ?? null };
+    // Diagnostica: chi è stato popolato e da dove
+    if (debug === 'who') {
+      const who = orders.map((o: any) => {
+        const fromCustomer = o?.customer && (o.customer.first_name || o.customer.last_name);
+        const fromBilling = o?.billing_address && (o.billing_address.first_name || o.billing_address.last_name);
+        const fromShipping = o?.shipping_address && (o.shipping_address.first_name || o.shipping_address.last_name);
+        return {
+          orderName: o.name,
+          has_customer_obj: Boolean(fromCustomer),
+          has_billing_name: Boolean(fromBilling),
+          has_shipping_name: Boolean(fromShipping),
+          email_sources: {
+            order_email: Boolean(o?.email),
+            contact_email: Boolean(o?.contact_email),
+            customer_email: Boolean(o?.customer?.email),
+          },
+          resolved_name: getCustomerName(o),
+          resolved_email: getCustomerEmail(o),
+        };
       });
-      return res.status(200).json({ ok: true, debug: 'notesparse', since, until, orders_count: orders.length, orders: out });
+      return res.status(200).json({ ok: true, debug: 'who', since, until, orders_count: orders.length, who: who.slice(0, 25) });
     }
 
+    // 2) Trasforma -> righe
     const rowsAll: any[][] = [];
     for (const order of orders) rowsAll.push(...collectRowsFromOrder(order));
 
+    // 3) dryRun o scrittura
     if (dryRun) {
       return res.status(200).json({
-        ok: true,
-        dryRun: true,
-        since, until,
+        ok: true, dryRun: true, since, until,
         orders_count: orders.length,
         rows_count: rowsAll.length,
         sample_rows: rowsAll.slice(0, 5),
