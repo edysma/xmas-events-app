@@ -4,17 +4,22 @@ import crypto from 'crypto';
 import { google } from 'googleapis';
 
 // ---------- Config ----------
+export const config = {
+  api: {
+    // IMPORTANTE: niente bodyParser -> ci prendiamo il RAW body per l'HMAC
+    bodyParser: false,
+  },
+};
+
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
-type Counts = { Adulto: number; Bambino: number; Disabilità: number; Unico: number; Sconosciuto: number };
-
-// ---------- Google Sheets client (private key normalizzata) ----------
+// ---------- Google Sheets ----------
 function getSheetsClient() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!;
   let key = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!;
   key = key.replace(/\\n/g, '\n').replace(/\r/g, '').trim();
-  if (!key.startsWith('-----BEGIN PRIVATE KEY-----') || !key.endsWith('-----END PRIVATE KEY-----')) {
-    throw new Error('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY non è un PEM valido (BEGIN/END).');
+  if (!key.startsWith('-----BEGIN PRIVATE KEY-----')) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY non è un PEM valido.');
   }
   const jwt = new google.auth.JWT({ email, key, scopes: SCOPES });
   return google.sheets({ version: 'v4', auth: jwt });
@@ -33,33 +38,17 @@ async function appendRowsToSheet(rows: any[][]) {
   });
 }
 
-// ---------- HMAC (Shopify) ----------
-function verifyShopifyHmac(req: NextApiRequest, secret: string) {
-  const hmacHeader = req.headers['x-shopify-hmac-sha256'] as string | undefined;
-  if (!hmacHeader) return false;
-  const rawBody = (req as any).rawBody ?? JSON.stringify(req.body);
-  const digest = crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('base64');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader));
-  } catch {
-    return false;
-  }
-}
+// ---------- Utils comuni (come nel backfill) ----------
+type Counts = { Adulto: number; Bambino: number; Disabilità: number; Unico: number; Sconosciuto: number };
+const safeString = (x: any) => (x == null ? '' : String(x));
+const toRomeISO = (s?: string) => (s ? new Date(s).toISOString() : '');
 
-// ---------- Helpers ----------
-function toRomeISO(dateStr: string | undefined) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  return d.toISOString();
-}
-function safeString(x: any) { return x == null ? '' : String(x); }
-
-function normTicketType(s: string) {
-  const t = (s || '').toLowerCase();
+function normTicketType(src: string) {
+  const t = (src || '').toLowerCase();
   if (t.includes('adult')) return 'Adulto';
-  if (t.includes('bambin') || t.includes('child') || t.includes('kid')) return 'Bambino';
-  if (t.includes('disab') || t.includes('handicap') || t.includes('invalid')) return 'Disabilità';
-  if (t.includes('unico') || t.includes('unique') || t.includes('singolo')) return 'Unico';
+  if (/(bambin|child|kid)/.test(t)) return 'Bambino';
+  if (/(disab|handicap|invalid)/.test(t)) return 'Disabilità';
+  if (/(unico|unique|singol)/.test(t)) return 'Unico';
   return 'Sconosciuto';
 }
 
@@ -89,79 +78,10 @@ function extractDateSlot(li: any) {
   return { date, slot };
 }
 
-// --- Parser riepilogo note_attributes["_Riepilogo biglietti"] ---
-function parseNoteSummary(text: string) {
-  const lines = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const entries: Array<{ event?: string; date?: string; slot?: string; counts: Counts }> = [];
-
-  const countFromFragment = (frag: string) => {
-    const c: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
-    const re = /([A-Za-zÀ-ÿ]+)\s*[×x]\s*(\d+)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(frag)) !== null) {
-      const label = m[1].toLowerCase();
-      const n = parseInt(m[2], 10);
-      if (/adult/.test(label)) c.Adulto += n;
-      else if (/(bambin|child|kid)/.test(label)) c.Bambino += n;
-      else if (/(disab|handicap|invalid)/.test(label)) c.Disabilità += n;
-      else if (/(unico|unique|singol)/.test(label)) c.Unico += n;
-      else c.Sconosciuto += n;
-    }
-    return c;
-  };
-
-  for (const ln of lines) {
-    const arrow = ln.split('→');
-    if (arrow.length >= 2) {
-      const left = arrow[0].trim();
-      const right = arrow.slice(1).join('→').trim();
-
-      let event = '';
-      const partEvt = left.split('—')[0]?.trim();
-      if (partEvt && /wondy|fanta/i.test(partEvt)) event = partEvt;
-
-      let date = '';
-      let slot = '';
-      const mIso = left.match(/(20\d{2}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
-      const mIt = left.match(/(\d{1,2}\/\d{1,2}\/20\d{2})\s+(\d{1,2}:\d{2})/);
-      if (mIso) { date = mIso[1]; slot = mIso[2]; }
-      else if (mIt) {
-        const [d, m, y] = mIt[1].split('/');
-        date = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
-        slot = mIt[2];
-      }
-
-      const counts = countFromFragment(right);
-      entries.push({ event, date, slot, counts });
-    }
-  }
-
-  if (!entries.length && lines.length) {
-    entries.push({ counts: countFromFragment(lines[lines.length - 1]) });
-  }
-  return entries;
-}
-
-function getNoteSummaryEntries(order: any) {
-  const notes = Array.isArray(order.note_attributes) ? order.note_attributes : [];
-  const entry = notes.find((n: any) => String(n?.name).trim().toLowerCase() === '_riepilogo biglietti');
-  return entry ? parseNoteSummary(String(entry.value)) : [];
-}
-
-function guessEventFromOrder(order: any, orderTags: string[]) {
-  const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
-  for (const li of lineItems) {
-    const ev = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
-    if (ev !== 'Sconosciuto') return ev;
-  }
-  return 'Sconosciuto';
-}
-
-// --- Conteggio tipi dalle PROPERTIES del line item (usa quantity se trova l'etichetta) ---
-function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
+function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean; sawHandicapHint: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
   let used = false;
-  const qty = Number(li.quantity || 0);
+  let sawHandicapHint = false;
 
   const props = Array.isArray(li.properties) ? li.properties : [];
   const entries = props.map((p: any) => ({
@@ -169,23 +89,58 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
     v: String(p?.value ?? '').toLowerCase().trim(),
   }));
 
+  const inc = (label: keyof Counts, n = 1) => { (counts as any)[label] += n; used = true; };
   const has = (s: string, re: RegExp) => re.test(s);
+
   const R_ADULTO = /adult/;
   const R_BAMBINO = /(bambin|child|kid)/;
-  const R_DISAB  = /(disab|handicap|invalid)/;
+  const R_DISAB   = /(disab|handicap|invalid)/;
+  const R_UNICO   = /(unico|unique|singol)/;
   const R_TIPO_FIELD = /(tipo|tipologia|tariffa|ticket|categoria|bigliett|ingresso|label)/;
 
   for (const { k, v } of entries) {
-    if (has(v, R_ADULTO) || (has(k, R_TIPO_FIELD) && has(v, R_ADULTO))) { counts.Adulto += qty; used = true; break; }
-    if (has(v, R_BAMBINO) || (has(k, R_TIPO_FIELD) && has(v, R_BAMBINO))) { counts.Bambino += qty; used = true; break; }
-    if (has(v, R_DISAB)  || (has(k, R_TIPO_FIELD) && has(v, R_DISAB)))  { counts.Disabilità += qty; used = true; break; }
+    if (has(v, R_DISAB) || has(k, R_DISAB)) sawHandicapHint = true;
+
+    if (has(v, R_ADULTO)) { inc('Adulto'); continue; }
+    if (has(v, R_BAMBINO)) { inc('Bambino'); continue; }
+    if (has(v, R_DISAB))   { inc('Disabilità'); continue; }
+    if (has(v, R_UNICO))   { inc('Unico'); continue; }
+
+    if (has(k, R_ADULTO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Adulto', n); continue; }
+    if (has(k, R_BAMBINO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Bambino', n); continue; }
+    if (has(k, R_DISAB))   { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Disabilità', n); continue; }
+    if (has(k, R_UNICO))   { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Unico', n); continue; }
+
+    if (has(k, R_TIPO_FIELD) && v) {
+      let t = 'Sconosciuto';
+      if (R_ADULTO.test(v)) t = 'Adulto';
+      else if (R_BAMBINO.test(v)) t = 'Bambino';
+      else if (R_DISAB.test(v))   t = 'Disabilità';
+      else if (R_UNICO.test(v))   t = 'Unico';
+      inc(t as keyof Counts);
+      continue;
+    }
   }
 
   const total = counts.Adulto + counts.Bambino + counts.Disabilità + counts.Unico + counts.Sconosciuto;
-  return { counts, total, used };
+  return { counts, total, used, sawHandicapHint };
 }
 
-// ---------- Aggregazione per ordine×evento×data×slot ----------
+function classifyFromPrice(li: any, sawHandicapHint: boolean): { counts: Counts; totalPeople: number; used: boolean } {
+  const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
+  const qty = Number(li.quantity || 0);
+  const priceStr = String(li.price || li.price_set?.shop_money?.amount || '').replace(',', '.').trim();
+  const price = parseFloat(priceStr);
+  if (!qty || isNaN(price)) return { counts, totalPeople: 0, used: false };
+
+  if (Math.abs(price - 9) < 0.001) { counts.Bambino += qty; return { counts, totalPeople: qty, used: true }; }
+  if (Math.abs(price - 11) < 0.001) {
+    if (sawHandicapHint) { counts.Disabilità += qty; return { counts, totalPeople: qty * 2, used: true }; }
+    counts.Adulto += qty; return { counts, totalPeople: qty, used: true };
+  }
+  return { counts, totalPeople: qty, used: false };
+}
+
 function collectRowsFromOrder(order: any) {
   const buckets = new Map<string, {
     createdAt: string; orderName: string; orderId: string;
@@ -199,79 +154,65 @@ function collectRowsFromOrder(order: any) {
   const processedAt = toRomeISO(order.processed_at);
   const orderName = safeString(order.name);
   const orderId = safeString(order.id);
-  const customerName = order?.customer ? `${safeString(order.customer.first_name)} ${safeString(order.customer.last_name)}`.trim() : '';
-  const customerEmail = safeString(order?.email || order?.contact_email);
+  const customerName = ''; // niente PII sul piano attuale
+  const customerEmail = '';
   const currency = safeString(order.currency);
   const totalGross = Number(order.total_price ?? 0);
   const payGws = Array.isArray(order.payment_gateway_names) ? order.payment_gateway_names.join(',') : '';
+
   const orderTags = (order.tags || '').split(',').map((t: string) => t.trim()).filter(Boolean);
   const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
 
-  // 0) se abbiamo il riepilogo nelle note, è la fonte primaria
-  const notesEntries = getNoteSummaryEntries(order);
-  if (notesEntries.length) {
-    const eventGuess = guessEventFromOrder(order, orderTags);
-    for (const e of notesEntries) {
-      const date = e.date || '';
-      const slot = e.slot || '';
-      const key = [orderId, eventGuess, date, slot].join('||');
+  for (const li of lineItems) {
+    if (li.gift_card === true) continue;
 
-      if (!buckets.has(key)) {
-        buckets.set(key, {
-          createdAt, orderName, orderId, customerName, customerEmail,
-          event: eventGuess, date, slot,
-          counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
-          qtyTotal: 0,
-          totalGross, currency, payGws, processedAt,
-        });
+    const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
+    const { date, slot } = extractDateSlot(li);
+
+    const viaProps = countTypesFromProperties(li);
+    const sawHandicapHint =
+      viaProps.sawHandicapHint ||
+      /(disab|handicap|invalid)/i.test(String(li.title || '')) ||
+      /(disab|handicap|invalid)/i.test(String(li.name || ''));
+
+    let usedPeople = 0;
+    if (!viaProps.used) {
+      const byPrice = classifyFromPrice(li, sawHandicapHint);
+      if (byPrice.used) {
+        viaProps.counts.Adulto      += byPrice.counts.Adulto;
+        viaProps.counts.Bambino     += byPrice.counts.Bambino;
+        viaProps.counts.Disabilità  += byPrice.counts.Disabilità;
+        viaProps.counts.Unico       += byPrice.counts.Unico;
+        viaProps.counts.Sconosciuto += byPrice.counts.Sconosciuto;
+        usedPeople = byPrice.totalPeople;
       }
-      const b = buckets.get(key)!;
-      const sum = e.counts.Adulto + e.counts.Bambino + e.counts.Disabilità + e.counts.Unico + e.counts.Sconosciuto;
-      b.qtyTotal += sum;
-      b.counts.Adulto      += e.counts.Adulto;
-      b.counts.Bambino     += e.counts.Bambino;
-      b.counts.Disabilità  += e.counts.Disabilità;
-      b.counts.Unico       += e.counts.Unico;
-      b.counts.Sconosciuto += e.counts.Sconosciuto;
     }
-  } else {
-    // 1) altrimenti prova a leggere la tipologia dalle properties per ogni line item
-    for (const li of lineItems) {
-      if (li.gift_card === true) continue;
-
-      const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
-      const { date, slot } = extractDateSlot(li);
-
-      const viaProps = countTypesFromProperties(li);
-      if (!viaProps.used) {
-        // 2) fallback: deduci dal titolo/sku/variant e conta la quantity
-        const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
-        let t = normTicketType(source);
-        if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
-        if (t === 'Sconosciuto') t = 'Unico';
-        (viaProps.counts as any)[t] += Number(li.quantity || 0);
-      }
-
-      const key = [orderId, event, date, slot].join('||');
-      if (!buckets.has(key)) {
-        buckets.set(key, {
-          createdAt, orderName, orderId, customerName, customerEmail,
-          event, date, slot,
-          counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
-          qtyTotal: 0,
-          totalGross, currency, payGws, processedAt,
-        });
-      }
-      const b = buckets.get(key)!;
-
-      const addQty = viaProps.used ? (viaProps.total || Number(li.quantity || 0)) : Number(li.quantity || 0);
-      b.qtyTotal += addQty;
-      b.counts.Adulto      += viaProps.counts.Adulto;
-      b.counts.Bambino     += viaProps.counts.Bambino;
-      b.counts.Disabilità  += viaProps.counts.Disabilità;
-      b.counts.Unico       += viaProps.counts.Unico;
-      b.counts.Sconosciuto += viaProps.counts.Sconosciuto;
+    if (!viaProps.used && usedPeople === 0) {
+      const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
+      let t = normTicketType(source);
+      if (/(handicap|disab)/i.test(t)) t = 'Disabilità';
+      if (t === 'Sconosciuto') t = 'Unico';
+      (viaProps.counts as any)[t] += Number(li.quantity || 0);
+      usedPeople = Number(li.quantity || 0);
     }
+
+    const key = [orderId, event, date, slot].join('||');
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        createdAt, orderName, orderId, customerName, customerEmail,
+        event, date, slot,
+        counts: { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 },
+        qtyTotal: 0, totalGross, currency, payGws, processedAt,
+      });
+    }
+    const b = buckets.get(key)!;
+    const addPeople = usedPeople || Number(li.quantity || 0);
+    b.qtyTotal += addPeople;
+    b.counts.Adulto      += viaProps.counts.Adulto;
+    b.counts.Bambino     += viaProps.counts.Bambino;
+    b.counts.Disabilità  += viaProps.counts.Disabilità;
+    b.counts.Unico       += viaProps.counts.Unico;
+    b.counts.Sconosciuto += viaProps.counts.Sconosciuto;
   }
 
   const rows: any[][] = [];
@@ -294,36 +235,55 @@ function collectRowsFromOrder(order: any) {
   return rows;
 }
 
-// ---------- Next config ----------
-export const config = {
-  api: {
-    bodyParser: { sizeLimit: '2mb' },
-  },
-};
+// ---------- HMAC (Shopify) ----------
+function timingSafeEq(a: string, b: string) {
+  try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; }
+}
+function verifyHmacFromRaw(raw: Buffer, secret: string, header: string | undefined) {
+  if (!header) return false;
+  const digest = crypto.createHmac('sha256', secret).update(raw).digest('base64');
+  return timingSafeEq(digest, header);
+}
+
+// ---------- Raw body helper ----------
+async function readRawBody(req: NextApiRequest): Promise<Buffer> {
+  return await new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
 
 // ---------- Handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const dryRun = String(req.query.dryRun || '') === '1';
+    const isWebhook = Boolean(req.headers['x-shopify-topic']);
+    const dryRun = String((req.query as any).dryRun || '') === '1';
     const secret = process.env.SHOPIFY_WEBHOOK_SECRET || '';
 
-    const isWebhook = Boolean(req.headers['x-shopify-topic']);
+    // 1) Leggi RAW body (necessario sia per HMAC che per parsing)
+    const raw = await readRawBody(req);
+    const payload = raw.length ? JSON.parse(raw.toString('utf8')) : null;
+
+    // 2) Se è webhook Shopify, verifica HMAC
     if (isWebhook) {
-      if (!secret) return res.status(500).json({ ok: false, error: 'SHOPIFY_WEBHOOK_SECRET not set' });
-      const ok = verifyShopifyHmac(req, secret);
+      if (!secret) return res.status(500).json({ ok: false, error: 'SHOPIFY_WEBHOOK_SECRET non configurato' });
+      const ok = verifyHmacFromRaw(raw, secret, req.headers['x-shopify-hmac-sha256'] as string | undefined);
       if (!ok) return res.status(401).json({ ok: false, error: 'Invalid HMAC' });
     }
 
-    const order = req.body && req.body.id ? req.body : null;
+    // 3) Prendi l’ordine dal payload
+    const order = payload && payload.id ? payload : null;
     if (!order) return res.status(400).json({ ok: false, error: 'Invalid payload: expected order object' });
 
+    // 4) Trasforma → righe
     const rows = collectRowsFromOrder(order);
 
-    if (dryRun) {
-      return res.status(200).json({ ok: true, dryRun: true, preview_rows: rows });
-    }
+    // 5) dryRun o scrittura
+    if (dryRun) return res.status(200).json({ ok: true, dryRun: true, preview_rows: rows });
+    if (rows.length > 0) await appendRowsToSheet(rows);
 
-    await appendRowsToSheet(rows);
     return res.status(200).json({ ok: true, appended: rows.length });
   } catch (err: any) {
     console.error('orders-to-sheets error', err);
