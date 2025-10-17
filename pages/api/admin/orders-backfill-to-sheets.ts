@@ -4,9 +4,8 @@ import { google } from 'googleapis';
 
 // === Config ===
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-const API_VERSION = '2024-10';
+const API_VERSION = '2024-10'; // usiamo l'API recente
 
-// === Tipi ===
 type Counts = { Adulto: number; Bambino: number; Disabilità: number; Unico: number; Sconosciuto: number };
 
 // === Google Sheets client (normalizza la private key) ===
@@ -65,8 +64,8 @@ function extractDateSlot(li: any) {
   const props = Array.isArray(li.properties) ? li.properties : [];
   const propMap: Record<string, string> = {};
   for (const p of props) if (p?.name) propMap[String(p.name).toLowerCase()] = String(p.value ?? '');
-  let date = propMap['data'] || propMap['date'] || '';
-  let slot = propMap['orario'] || propMap['ora'] || propMap['slot'] || '';
+  let date = propMap['data'] || propMap['date'] || propMap['event_date'] || '';
+  let slot = propMap['orario'] || propMap['ora'] || propMap['slot'] || propMap['slot_label'] || '';
   if ((!date || !slot) && typeof li.title === 'string') {
     const mDate = li.title.match(/(20\d{2}-\d{2}-\d{2})/);
     const mSlot = li.title.match(/\b(\d{1,2}:\d{2})\b/);
@@ -76,6 +75,7 @@ function extractDateSlot(li: any) {
   return { date, slot };
 }
 
+// === Conteggio tipi dalle PROPERTIES (per i nuovi ordini) ===
 function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
   let used = false;
@@ -95,7 +95,7 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
   const R_BAMBINO = /(bambin|child|kid)/;
   const R_DISAB = /(disab|handicap|invalid)/;
   const R_UNICO = /(unico|unique|singol)/;
-  const R_TIPO_FIELD = /(tipo|tipologia|tariffa|ticket|categoria|bigliett)/;
+  const R_TIPO_FIELD = /(tipo|tipologia|tariffa|ticket|categoria|bigliett|ingresso|label)/;
 
   for (const { k, v } of entries) {
     if (valHas(v, R_ADULTO)) { inc('Adulto'); continue; }
@@ -117,15 +117,66 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
       inc(t as keyof Counts);
       continue;
     }
-
-    if (/\d+/.test(v) && /(persone|persona|qty|quantita|quantità|pezzi)/.test(k)) {
-      const n = parseInt(v.match(/\d+/)![0], 10);
-      if (n > 0) inc('Unico', n);
-    }
   }
 
   const total = counts.Adulto + counts.Bambino + counts.Disabilità + counts.Unico + counts.Sconosciuto;
   return { counts, total, used };
+}
+
+// === Parser del riepilogo in note_attributes["_Riepilogo biglietti"] ===
+function parseNoteSummary(text: string) {
+  const lines = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  // Trova linee con pattern: "... → Adulto × 4 | Bambino × 3 | Disabilità × 1"
+  const entries: Array<{event?: string; date?: string; slot?: string; counts: Counts}> = [];
+
+  // helper per contare da un frammento "Adulto × 4 | Bambino x 3"
+  const countFromFragment = (frag: string) => {
+    const c: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
+    // match "Parola × 3" oppure "Parola x 3"
+    const re = /([A-Za-zÀ-ÿ]+)\s*[×x]\s*(\d+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(frag)) !== null) {
+      const label = m[1].toLowerCase();
+      const n = parseInt(m[2], 10);
+      if (/adult/.test(label)) c.Adulto += n;
+      else if (/(bambin|child|kid)/.test(label)) c.Bambino += n;
+      else if (/(disab|handicap|invalid)/.test(label)) c.Disabilità += n;
+      else if (/(unico|unique|singol)/.test(label)) c.Unico += n;
+      else c.Sconosciuto += n;
+    }
+    return c;
+  };
+
+  for (const ln of lines) {
+    // es. "2025-10-18 16:00 → Adulto × 4 | Bambino × 3"
+    const arrow = ln.split('→');
+    if (arrow.length >= 2) {
+      const left = arrow[0].trim();
+      const right = arrow.slice(1).join('→').trim();
+
+      // data + orario: supporta "2025-10-18 16:00" oppure "18/10/2025 16:00"
+      let date = '';
+      let slot = '';
+      const mIso = left.match(/(20\d{2}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
+      const mIt = left.match(/(\d{1,2}\/\d{1,2}\/20\d{2})\s+(\d{1,2}:\d{2})/);
+      if (mIso) { date = mIso[1]; slot = mIso[2]; }
+      else if (mIt) { 
+        const [d,m,y] = mIt[1].split('/');
+        date = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+        slot = mIt[2];
+      }
+
+      const counts = countFromFragment(right);
+      entries.push({ date, slot, counts });
+    }
+  }
+
+  // Se non ha trovato righe con "→", prova ad analizzare l'ultima riga come puro elenco
+  if (!entries.length && lines.length) {
+    entries.push({ counts: countFromFragment(lines[lines.length - 1]) });
+  }
+
+  return entries;
 }
 
 // === Utils backfill ===
@@ -138,7 +189,7 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const token = process.env.ADMIN_ACCESS_TOKEN!;
   const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
   const orders: any[] = [];
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,line_items`;
+  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,note_attributes,line_items`;
   while (nextUrl) {
     const resp = await fetch(nextUrl, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }});
     if (!resp.ok) { const text = await resp.text(); throw new Error(`Shopify ${resp.status}: ${text}`); }
@@ -151,26 +202,7 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   return orders;
 }
 
-// == FETCH (diagnostico: NIENTE fields => line_items completi)
-async function fetchOrdersInRangeFull(minISO: string, maxISO: string) {
-  const shop = process.env.SHOP_DOMAIN!;
-  const token = process.env.ADMIN_ACCESS_TOKEN!;
-  const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
-  const orders: any[] = [];
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc`;
-  while (nextUrl) {
-    const resp = await fetch(nextUrl, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }});
-    if (!resp.ok) { const text = await resp.text(); throw new Error(`Shopify ${resp.status}: ${text}`); }
-    const data = await resp.json();
-    orders.push(...(data.orders || []));
-    const link = resp.headers.get('link') || '';
-    const m = link.match(/<([^>]+)>;\s*rel="next"/i);
-    nextUrl = m ? m[1] : '';
-  }
-  return orders;
-}
-
-// === Trasforma un ordine in righe aggregate ===
+// === Trasforma un ordine in righe aggregate (versione attuale; integrazione note la faremo nello step successivo) ===
 function collectRowsFromOrder(order: any) {
   const buckets = new Map<string, {
     createdAt: string; orderName: string; orderId: string;
@@ -199,7 +231,10 @@ function collectRowsFromOrder(order: any) {
     const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
     const { date, slot } = extractDateSlot(li);
 
+    // 1) tenta properties
     const viaProps = countTypesFromProperties(li);
+
+    // 2) se niente nelle properties: usa titolo/sku * quantity
     if (!viaProps.used) {
       const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
       let t = normTicketType(source);
@@ -220,7 +255,7 @@ function collectRowsFromOrder(order: any) {
     }
     const b = buckets.get(key)!;
 
-    const addQty = (viaProps.total || Number(li.quantity || 0));
+    const addQty = viaProps.used ? (viaProps.total || Number(li.quantity || 0)) : Number(li.quantity || 0);
     b.qtyTotal += addQty;
     b.counts.Adulto      += viaProps.counts.Adulto;
     b.counts.Bambino     += viaProps.counts.Bambino;
@@ -243,7 +278,7 @@ function collectRowsFromOrder(order: any) {
       b.createdAt, b.orderName, b.orderId, b.customerName, b.customerEmail,
       b.event, b.date, b.slot,
       mix, b.counts.Adulto, b.counts.Bambino, b.counts.Disabilità, b.counts.Unico, b.counts.Sconosciuto, b.qtyTotal,
-      b.totalGross, b.currency, b.payGws, b.processedAt,
+      totalGross, currency, payGws, processedAt,
     ]);
   }
   return rows;
@@ -266,16 +301,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const debug = String(q.debug || '').toLowerCase();
     const filterOrderName = String(q.orderName || '');
 
-    // <<< NOVITÀ: debug=q PRIMA DI QUALSIASI VALIDAZIONE >>>
-    if (debug === 'q') {
-      return res.status(200).json({
-        ok: true,
-        debug: 'q',
-        query: q,
-        rawUrl: req.url,
-      });
-    }
-
     if (!since || !/^\d{4}-\d{2}-\d{2}$/.test(since)) {
       return res.status(400).json({ ok: false, error: 'Parametro "since" richiesto. Formato: YYYY-MM-DD' });
     }
@@ -286,24 +311,39 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const minISO = asUTCStart(since);
     const maxISO = asUTCEnd(until);
 
-    // Modalità diagnostica: line_items raw COMPLETI
-    if (debug === 'li') {
-      let orders = await fetchOrdersInRangeFull(minISO, maxISO);
-      if (filterOrderName) orders = orders.filter((o: any) => String(o.name) === filterOrderName);
-      const dbg = orders.slice(0, 3).map((o: any) => ({
+    // 1) Scarica ordini
+    let orders = await fetchOrdersInRange(minISO, maxISO);
+    if (filterOrderName) orders = orders.filter(o => String(o.name) === filterOrderName);
+
+    // ——— Modalità diagnostiche ———
+    if (debug === 'notes') {
+      const dbg = orders.slice(0, 5).map(o => ({
         orderName: o.name,
         orderId: o.id,
         created_at: o.created_at,
-        line_items: (Array.isArray(o.line_items) ? o.line_items : []).map((li: any) => li),
-
+        note_attributes: Array.isArray(o.note_attributes)
+          ? o.note_attributes.map((na: any) => ({ name: na?.name, value: na?.value }))
+          : [],
       }));
-      return res.status(200).json({ ok: true, debug: 'li', since, until, orders_count: orders.length, orders: dbg });
+      return res.status(200).json({ ok: true, debug: 'notes', since, until, orders_count: orders.length, orders: dbg });
     }
 
-    // Flusso normale
-    let orders = await fetchOrdersInRange(minISO, maxISO);
-    if (filterOrderName) orders = orders.filter((o: any) => String(o.name) === filterOrderName);
+    if (debug === 'notesparse') {
+      const out = orders.map(o => {
+        const notes = Array.isArray(o.note_attributes) ? o.note_attributes : [];
+        const entry = notes.find((n: any) => String(n?.name).trim().toLowerCase() === '_riepilogo biglietti');
+        const parsed = entry ? parseNoteSummary(String(entry.value)) : [];
+        return {
+          orderName: o.name,
+          has_summary: Boolean(entry),
+          parsed, // array di blocchi { date?, slot?, counts{...} }
+          raw_summary: entry?.value ?? null,
+        };
+      });
+      return res.status(200).json({ ok: true, debug: 'notesparse', since, until, orders_count: orders.length, orders: out });
+    }
 
+    // ——— Flusso normale (dryRun/scrittura) ———
     const rowsAll: any[][] = [];
     for (const order of orders) {
       const rows = collectRowsFromOrder(order);
