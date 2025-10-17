@@ -76,7 +76,7 @@ function extractDateSlot(li: any) {
   return { date, slot };
 }
 
-// === Nuovo: conteggio tipi dalle PROPERTIES ===
+// === Nuovo: conteggio tipi dalle PROPERTIES (resta com’è) ===
 function countTypesFromProperties(li: any): { counts: Counts; total: number; used: boolean } {
   const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
   let used = false;
@@ -85,7 +85,6 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
   const entries = props.map((p: any) => ({
     k: String(p?.name ?? '').toLowerCase().trim(),
     v: String(p?.value ?? '').toLowerCase().trim(),
-    rawV: String(p?.value ?? ''),
   }));
 
   const inc = (label: keyof Counts, n = 1) => { (counts as any)[label] += n; used = true; };
@@ -100,19 +99,16 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
   const R_TIPO_FIELD = /(tipo|tipologia|tariffa|ticket|categoria|bigliett)/;
 
   for (const { k, v } of entries) {
-    // 1) Valore contiene il tipo -> +1 per persona
     if (valHas(v, R_ADULTO)) { inc('Adulto'); continue; }
     if (valHas(v, R_BAMBINO)) { inc('Bambino'); continue; }
     if (valHas(v, R_DISAB)) { inc('Disabilità'); continue; }
     if (valHas(v, R_UNICO)) { inc('Unico'); continue; }
 
-    // 2) Nome campo è il tipo (con numero) -> usa numero nel valore o booleano
     if (keyHas(k, R_ADULTO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Adulto', n); continue; }
     if (keyHas(k, R_BAMBINO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Bambino', n); continue; }
     if (keyHas(k, R_DISAB)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Disabilità', n); continue; }
     if (keyHas(k, R_UNICO)) { const m = v.match(/\d+/); const n = m ? parseInt(m[0], 10) : (/(true|si|sì|yes)/.test(v) ? 1 : 0); if (n > 0) inc('Unico', n); continue; }
 
-    // 3) Campi "Tipo/Tipologia/Ticket/..." (anche "Tipo 1", "Tipo biglietto 1")
     if (keyHas(k, R_TIPO_FIELD) && v) {
       let t = 'Sconosciuto';
       if (R_ADULTO.test(v)) t = 'Adulto';
@@ -123,7 +119,6 @@ function countTypesFromProperties(li: any): { counts: Counts; total: number; use
       continue;
     }
 
-    // 4) Ultima spiaggia: valore numerico su chiavi generiche -> metti in Unico
     if (/\d+/.test(v) && /(persone|persona|qty|quantita|quantità|pezzi)/.test(k)) {
       const n = parseInt(v.match(/\d+/)![0], 10);
       if (n > 0) inc('Unico', n);
@@ -163,10 +158,8 @@ function collectRowsFromOrder(order: any) {
     const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
     const { date, slot } = extractDateSlot(li);
 
-    // 1) Prova a contare dalle properties (per-persona o numeriche)
     const viaProps = countTypesFromProperties(li);
 
-    // 2) Se nulla nelle properties, usa variante/titolo/SKU * quantity
     if (!viaProps.used) {
       const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
       let t = normTicketType(source);
@@ -226,8 +219,8 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
 
   const orders: any[] = [];
-  // campi essenziali (line_items include title, variant_title, sku, properties, quantity)
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,line_items`;
+  // AGGIUNTO: note_attributes nei campi
+  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,currency,total_price,payment_gateway_names,note_attributes,line_items`;
 
   while (nextUrl) {
     const resp = await fetch(nextUrl, {
@@ -243,7 +236,6 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
     const data = await resp.json();
     orders.push(...(data.orders || []));
 
-    // Pagination via Link header (rel="next")
     const link = resp.headers.get('link') || '';
     const m = link.match(/<([^>]+)>;\s*rel="next"/i);
     nextUrl = m ? m[1] : '';
@@ -258,14 +250,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const adminSecret = process.env.ADMIN_SECRET || '';
     const q = req.query as any;
 
-    // Sicurezza semplice: secret nel querystring o header
     const provided = (q.secret as string) || (req.headers['x-admin-secret'] as string);
     if (!adminSecret || provided !== adminSecret) {
       return res.status(401).json({ ok: false, error: 'Unauthorized (secret mancante o errato)' });
     }
 
-    const since = String(q.since || '').trim(); // YYYY-MM-DD (obbligatorio)
-    const until = String(q.until || '').trim() || new Date().toISOString().slice(0,10); // YYYY-MM-DD (default: oggi)
+    const since = String(q.since || '').trim();
+    const until = String(q.until || '').trim() || new Date().toISOString().slice(0,10);
     const dryRun = String(q.dryRun || '') === '1';
     const debug = String(q.debug || '').toLowerCase();
     const filterOrderName = String(q.orderName || '');
@@ -280,40 +271,36 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const minISO = asUTCStart(since);
     const maxISO = asUTCEnd(until);
 
-    // 1) Scarica ordini
     let orders = await fetchOrdersInRange(minISO, maxISO);
     if (filterOrderName) {
       orders = orders.filter(o => String(o.name) === filterOrderName);
     }
 
-    // === MODALITÀ DIAGNOSTICA: mostra le properties dei line item ===
-    if (debug === 'props') {
+    // ————— MODALITÀ DIAGNOSTICA: NOTE ATTRIBUTES —————
+    if (debug === 'notes') {
       const dbg = orders.slice(0, 5).map(o => ({
         orderName: o.name,
         orderId: o.id,
         created_at: o.created_at,
+        note_attributes: Array.isArray(o.note_attributes)
+          ? o.note_attributes.map((na: any) => ({ name: na?.name, value: na?.value }))
+          : [],
         line_items: (Array.isArray(o.line_items) ? o.line_items : []).map((li: any) => ({
           title: li.title,
           variant_title: li.variant_title,
-          sku: li.sku,
-          quantity: li.quantity,
-          properties: (Array.isArray(li.properties) ? li.properties : []).map((p: any) => ({
-            name: p?.name,
-            value: p?.value
-          })),
+          quantity: li.quantity
         })),
       }));
-      return res.status(200).json({ ok: true, debug: 'props', since, until, orders_count: orders.length, orders: dbg });
+      return res.status(200).json({ ok: true, debug: 'notes', since, until, orders_count: orders.length, orders: dbg });
     }
 
-    // 2) Trasforma -> righe
+    // ————— flusso normale (dryRun/scrittura) —————
     const rowsAll: any[][] = [];
     for (const order of orders) {
       const rows = collectRowsFromOrder(order);
       rowsAll.push(...rows);
     }
 
-    // 3) Se dryRun: non scrive, mostra anteprima
     if (dryRun) {
       return res.status(200).json({
         ok: true,
@@ -326,7 +313,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    // 4) Scrive su Sheets in batch
     const BATCH = 500;
     for (let i = 0; i < rowsAll.length; i += BATCH) {
       await appendRowsToSheet(rowsAll.slice(i, i + BATCH));
