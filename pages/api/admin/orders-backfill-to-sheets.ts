@@ -3,8 +3,11 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { google } from 'googleapis';
 
 // === Config ===
-const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-const API_VERSION = '2023-10'; // va benissimo per il backfill
+const SCOPES = ['https://www.googleapis.com/auth/spreadssheets'];
+const API_VERSION = '2023-10'; // ok per backfill
+
+// === Tipi ===
+type Counts = { Adulto: number; Bambino: number; Disabilità: number; Unico: number; Sconosciuto: number };
 
 // === Google Sheets client (normalizza la private key) ===
 function getSheetsClient() {
@@ -31,7 +34,7 @@ async function appendRowsToSheet(rows: any[][]) {
   });
 }
 
-// === Helpers comuni (uguali all'altro endpoint) ===
+// === Helpers comuni ===
 function toRomeISO(dateStr: string | undefined) {
   if (!dateStr) return '';
   const d = new Date(dateStr);
@@ -64,7 +67,6 @@ function extractDateSlot(li: any) {
   for (const p of props) if (p?.name) propMap[String(p.name).toLowerCase()] = String(p.value ?? '');
   let date = propMap['data'] || propMap['date'] || '';
   let slot = propMap['orario'] || propMap['ora'] || propMap['slot'] || '';
-
   if ((!date || !slot) && typeof li.title === 'string') {
     const mDate = li.title.match(/(20\d{2}-\d{2}-\d{2})/);
     const mSlot = li.title.match(/\b(\d{1,2}:\d{2})\b/);
@@ -74,8 +76,53 @@ function extractDateSlot(li: any) {
   return { date, slot };
 }
 
+// === Nuovo: conteggio tipi dalle PROPERTIES per persona o numeriche ===
+function countTypesFromProperties(li: any): { counts: Counts; total: number; usedProps: boolean } {
+  const counts: Counts = { Adulto: 0, Bambino: 0, Disabilità: 0, Unico: 0, Sconosciuto: 0 };
+  let usedProps = false;
+
+  const props = Array.isArray(li.properties) ? li.properties : [];
+  const propMap: Record<string, string> = {};
+  for (const p of props) if (p?.name) propMap[String(p.name).toLowerCase().trim()] = String(p.value ?? '').trim();
+
+  // A) Per-persona: "Tipo", "Tipologia", "Tariffa", "Ticket", "Categoria" con o senza numero (Tipo 1, Tipo 2, ...)
+  const perKeys = Object.keys(propMap).filter(k => /^(tipo|tipologia|tariffa|ticket|categoria)(\s*\d+)?$/.test(k));
+  for (const k of perKeys) {
+    const v = propMap[k];
+    if (!v) continue;
+    let t = normTicketType(v);
+    if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
+    if (t === 'Sconosciuto') t = 'Unico';
+    (counts as any)[t] += 1;
+    usedProps = true;
+  }
+
+  // B) Numeriche: "Adulti: 2", "Bambini: 1", "Unico: 3", ecc.
+  const numericSets: Array<[keyof Counts, string[]]> = [
+    ['Adulto', ['adulto', 'adulti', 'adult']],
+    ['Bambino', ['bambino', 'bambini', 'child', 'kids', 'kid']],
+    ['Disabilità', ['disabilità', 'handicap', 'invalid']],
+    ['Unico', ['unico', 'singolo', 'unique']],
+  ];
+  for (const [label, keys] of numericSets) {
+    for (const kk of keys) {
+      const raw = propMap[kk];
+      if (!raw) continue;
+      const m = String(raw).match(/\d+/); // prima cifra trovata
+      const n = m ? parseInt(m[0], 10) : NaN;
+      if (!Number.isNaN(n) && n > 0) {
+        (counts as any)[label] += n;
+        usedProps = true;
+      }
+    }
+  }
+
+  const total = counts.Adulto + counts.Bambino + counts.Disabilità + counts.Unico + counts.Sconosciuto;
+  return { counts, total, usedProps };
+}
+
+// === Trasforma un ordine in righe aggregate ===
 function collectRowsFromOrder(order: any) {
-  type Counts = { Adulto: number; Bambino: number; Disabilità: number; Unico: number; Sconosciuto: number };
   const buckets = new Map<string, {
     createdAt: string; orderName: string; orderId: string;
     customerName: string; customerEmail: string;
@@ -93,6 +140,7 @@ function collectRowsFromOrder(order: any) {
   const currency = safeString(order.currency);
   const totalGross = Number(order.total_price ?? 0);
   const payGws = Array.isArray(order.payment_gateway_names) ? order.payment_gateway_names.join(',') : '';
+
   const orderTags = (order.tags || '').split(',').map((t: string) => t.trim()).filter(Boolean);
   const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
 
@@ -101,29 +149,18 @@ function collectRowsFromOrder(order: any) {
 
     const event = pickEventFrom(safeString(li.title), safeString(li.product_title), orderTags);
     const { date, slot } = extractDateSlot(li);
-    // Determina la tipologia anche dalle properties (Tipo, Tipologia, ecc.)
-const props = Array.isArray(li.properties) ? li.properties : [];
-const propMap: Record<string, string> = {};
-for (const p of props) if (p?.name) propMap[String(p.name).toLowerCase()] = String(p.value ?? '');
 
-// prova a leggere da properties prima; poi variante/titolo/SKU
-const propType =
-  propMap['tipo'] ||
-  propMap['tipologia'] ||
-  propMap['tipo biglietto'] ||
-  propMap['biglietto'] ||
-  propMap['ticket'] ||
-  propMap['categoria'] ||
-  propMap['tariffa'] ||
-  '';
+    // 1) Prova a contare dalle properties (per persona o numeriche)
+    const viaProps = countTypesFromProperties(li);
 
-const source = propType || safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
-let type = normTicketType(source);
-
-// normalizza sinonimi/varianti
-if (type.toLowerCase().includes('handicap')) type = 'Disabilità';
-if (type === 'Sconosciuto') type = 'Unico';
-
+    // 2) Se non c'era nulla nelle properties, usa variante/titolo/SKU * quantity
+    if (!viaProps.usedProps) {
+      const source = safeString(li.variant_title) || safeString(li.title) || safeString(li.sku);
+      let t = normTicketType(source);
+      if (t.toLowerCase().includes('handicap')) t = 'Disabilità';
+      if (t === 'Sconosciuto') t = 'Unico';
+      (viaProps.counts as any)[t] += Number(li.quantity || 0);
+    }
 
     const key = [orderId, event, date, slot].join('||');
     if (!buckets.has(key)) {
@@ -136,13 +173,17 @@ if (type === 'Sconosciuto') type = 'Unico';
       });
     }
     const b = buckets.get(key)!;
-    const qty = Number(li.quantity || 0);
-    b.qtyTotal += qty;
-    if (type === 'Adulto') b.counts.Adulto += qty;
-    else if (type === 'Bambino') b.counts.Bambino += qty;
-    else if (type === 'Disabilità') b.counts.Disabilità += qty;
-    else if (type === 'Unico') b.counts.Unico += qty;
-    else b.counts.Sconosciuto += qty;
+
+    const addQty = viaProps.usedProps
+      ? (viaProps.total || Number(li.quantity || 0))
+      : Number(li.quantity || 0);
+
+    b.qtyTotal += addQty;
+    b.counts.Adulto      += viaProps.counts.Adulto;
+    b.counts.Bambino     += viaProps.counts.Bambino;
+    b.counts.Disabilità  += viaProps.counts.Disabilità;
+    b.counts.Unico       += viaProps.counts.Unico;
+    b.counts.Sconosciuto += viaProps.counts.Sconosciuto;
   }
 
   const rows: any[][] = [];
@@ -159,7 +200,7 @@ if (type === 'Sconosciuto') type = 'Unico';
       b.createdAt, b.orderName, b.orderId, b.customerName, b.customerEmail,
       b.event, b.date, b.slot,
       mix, b.counts.Adulto, b.counts.Bambino, b.counts.Disabilità, b.counts.Unico, b.counts.Sconosciuto, b.qtyTotal,
-      b.totalGross, b.currency, b.payGws, b.processedAt,
+      totalGross, currency, payGws, processedAt,
     ]);
   }
   return rows;
@@ -175,7 +216,7 @@ async function fetchOrdersInRange(minISO: string, maxISO: string) {
   const base = `https://${shop}/admin/api/${API_VERSION}/orders.json`;
 
   const orders: any[] = [];
-  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,line_items,product_title,currency,total_price,subtotal_price,total_tax,total_discounts,current_total_price,payment_gateway_names`;
+  let nextUrl = `${base}?status=any&limit=250&created_at_min=${encodeURIComponent(minISO)}&created_at_max=${encodeURIComponent(maxISO)}&order=created_at+asc&fields=id,name,created_at,processed_at,email,tags,financial_status,fulfillment_status,customer,line_items,currency,total_price,subtotal_price,total_tax,total_discounts,current_total_price,payment_gateway_names`;
 
   while (nextUrl) {
     const resp = await fetch(nextUrl, {
@@ -249,7 +290,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    // 4) Scrive su Sheets in batch (per sicurezza)
+    // 4) Scrive su Sheets in batch
     const BATCH = 500;
     for (let i = 0; i < rowsAll.length; i += BATCH) {
       await appendRowsToSheet(rowsAll.slice(i, i + BATCH));
