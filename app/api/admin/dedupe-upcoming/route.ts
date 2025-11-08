@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { adminFetchGQL } from "@/lib/shopify-admin";
 
-/** --- Tipi minimi per tipizzare la risposta GraphQL --- */
+/** Tipi minimi per la risposta GraphQL */
 type Metafield = { key?: string | null; value?: string | null } | null;
 type VariantNode = { id: string; metafields?: Metafield[] | null } | null;
 type ProductNode = {
@@ -16,7 +16,7 @@ type ListResp = {
   } | null;
 };
 
-/** --- Query & Mutation --- */
+/** Query & Mutation */
 const Q_LIST_BUNDLE_VARIANTS = /* GraphQL */ `
   query List($cursor: String) {
     products(first: 50, after: $cursor, query: "tag:Bundle status:ACTIVE") {
@@ -50,37 +50,41 @@ const M_REL_BULK = /* GraphQL */ `
   }
 `;
 
-/** --- Utils --- */
+/** Utils */
 async function listAllBundleVariants() {
   const variants: { id: string; seat: string; qty: number }[] = [];
   let cursor: string | null = null;
 
-  while (true) {
-    // 👇 Tipizziamo la risposta per evitare l'errore TS
-    const data = await adminFetchGQL<ListResp>(Q_LIST_BUNDLE_VARIANTS, { cursor });
+  for (;;) {
+    // Cast esplicito per evitare l'implicit any
+    const raw = await adminFetchGQL(Q_LIST_BUNDLE_VARIANTS, { cursor });
+    const data = (raw as unknown) as ListResp;
 
     const edges = data?.products?.edges ?? [];
     for (const e of edges) {
       const vEdges = e?.node?.variants?.edges ?? [];
       for (const ve of vEdges) {
         const v = ve?.node;
-        if (!v) continue;
+        if (!v || !v.id) continue;
+
         const mfs = v.metafields ?? [];
-        const seat = (mfs.find((m) => m?.key === "seat_unit")?.value as string) || "";
-        const qtyStr = (mfs.find((m) => m?.key === "seats_per_ticket")?.value as string) || "1";
+        const seat = (mfs.find((m) => m?.key === "seat_unit")?.value ?? "") as string;
+        const qtyStr = (mfs.find((m) => m?.key === "seats_per_ticket")?.value ?? "1") as string;
         const qty = Number.parseInt(qtyStr, 10) || 1;
-        if (seat) variants.push({ id: v.id as string, seat, qty });
+
+        if (seat) variants.push({ id: v.id, seat, qty });
       }
     }
 
-    const hasNext = data?.products?.pageInfo?.hasNextPage ?? false;
+    const hasNext = Boolean(data?.products?.pageInfo?.hasNextPage);
     cursor = hasNext ? (edges[edges.length - 1]?.cursor ?? null) : null;
     if (!cursor) break;
   }
+
   return variants;
 }
 
-/** --- Route --- */
+/** Route */
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const secret = url.searchParams.get("secret") || req.headers.get("x-admin-secret") || "";
@@ -108,7 +112,7 @@ export async function GET(req: Request) {
     }));
 
     const res = await adminFetchGQL<{
-      productVariantRelationshipBulkUpdate?: { userErrors?: { message?: string }[] };
+      productVariantRelationshipBulkUpdate?: { userErrors?: { message?: string }[] } | null;
     }>(M_REL_BULK, { input: slice });
 
     const errs = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
@@ -122,5 +126,6 @@ export async function GET(req: Request) {
   return NextResponse.json({ ok: true, updated });
 }
 
-/** Opzionale: se vuoi forzare runtime Node (non Edge) */
+/** (facoltativi) per evitare cache e forzare runtime Node */
+export const dynamic = "force-dynamic";
 // export const runtime = "nodejs";
