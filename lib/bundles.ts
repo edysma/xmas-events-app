@@ -715,6 +715,7 @@ export async function setVariantPrices(
 /**
  * Collega un Seat Unit come componente di una variante Bundle
  * e scrive i metafield richiesti dal calendario.
+ * Fix: operazione idempotente → sempre remove+create per evitare duplicati.
  */
 export async function ensureVariantLeadsToSeat(opts: {
   bundleVariantId: string;
@@ -736,64 +737,49 @@ export async function ensureVariantLeadsToSeat(opts: {
           ownerId: bundleVariantId,
           namespace: "sinflora",
           key: "seat_unit",
-          type: "variant_reference",         // riferimento a ProductVariant
-          value: seatVariantId,              // GID della variante SeatUnit
+          type: "variant_reference", // riferimento a ProductVariant
+          value: seatVariantId,      // GID della variante SeatUnit
         },
         {
           ownerId: bundleVariantId,
           namespace: "sinflora",
           key: "seats_per_ticket",
-          type: "number_integer",            // 1 o 2
+          type: "number_integer",    // 1 o 2
           value: String(componentQuantity),
         },
       ],
     });
   }
 
-  // 1) Prova a creare la relationship
-  const createInput = [
+  // Idempotent: rimuove qualsiasi relazione esistente verso la Seat Unit
+  // e ricrea UNA SOLA relazione con la quantità desiderata.
+  const input = [
     {
       parentProductVariantId: bundleVariantId,
+      productVariantRelationshipsToRemove: [seatVariantId],
       productVariantRelationshipsToCreate: [
         { id: seatVariantId, quantity: componentQuantity },
       ],
     },
   ];
 
-  let res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
-    M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
-    { input: createInput }
-  );
+  const res = await adminFetchGQL<{
+    productVariantRelationshipBulkUpdate?: {
+      userErrors?: { field?: string[]; message: string }[];
+    };
+  }>(M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE, { input });
+
   const errs = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
-  if (!errs.length) {
-    await ensureVariantEventuallyVisible(bundleVariantId);
-    await upsertSeatMetafields(); // dopo CREATE
-    return { ok: true, created: true, updated: false, qty: componentQuantity };
+  if (errs.length) {
+    const all = errs.map(e => e?.message || JSON.stringify(e)).join("; ");
+    throw new Error(`Shopify GQL errors (ensureVariantLeadsToSeat): ${all}`);
   }
 
-  // 2) Se esiste già, aggiorna la quantità della relationship
-  const updateInput = [
-    {
-      parentProductVariantId: bundleVariantId,
-      productVariantRelationshipsToUpdate: [
-        { id: seatVariantId, quantity: componentQuantity },
-      ],
-    },
-  ];
+  await ensureVariantEventuallyVisible(bundleVariantId);
+  await upsertSeatMetafields();
 
-  res = await adminFetchGQL<{ productVariantRelationshipBulkUpdate: { userErrors?: { code?: string; field?: string[]; message: string }[] } }>(
-    M_PRODUCT_VARIANT_RELATIONSHIP_BULK_UPDATE,
-    { input: updateInput }
-  );
-  const errs2 = res?.productVariantRelationshipBulkUpdate?.userErrors ?? [];
-  if (!errs2.length) {
-    await ensureVariantEventuallyVisible(bundleVariantId);
-    await upsertSeatMetafields(); // dopo UPDATE
-    return { ok: true, created: false, updated: true, qty: componentQuantity };
-  }
-
-  const all = [...errs, ...errs2].map((e) => e?.message || JSON.stringify(e)).join("; ");
-  throw new Error(`Shopify GQL errors (ensureVariantLeadsToSeat): ${all}`);
+  // created=false/updated=true: l'operazione è “reset & set”
+  return { ok: true, created: false, updated: true, qty: componentQuantity };
 }
 
 async function ensureVariantEventuallyVisible(variantId: string, tries = 5) {
