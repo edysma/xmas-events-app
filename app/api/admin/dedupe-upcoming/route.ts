@@ -2,12 +2,24 @@
 import { NextResponse } from "next/server";
 import { adminFetchGQL } from "@/lib/shopify-admin";
 
-type Metafield = { key?: string | null; value?: string | null } | null;
-type VariantNode = { id: string; title?: string | null; metafields?: Metafield[] | null } | null;
+type CompNode = {
+  productVariant?: { id?: string | null; title?: string | null } | null;
+  quantity?: number | null;
+} | null;
+
+type VariantNode = {
+  id: string;
+  title?: string | null;
+  // metafield singolare (NO identifiers)
+  seatsMeta?: { value?: string | null } | null;
+  productVariantComponents?: { nodes?: CompNode[] | null } | null;
+} | null;
+
 type ProductNode = {
   id: string;
   variants?: { edges?: { node?: VariantNode }[] | null } | null;
 } | null;
+
 type ListResp = {
   products?: {
     edges?: { cursor?: string | null; node?: ProductNode }[] | null;
@@ -15,9 +27,9 @@ type ListResp = {
   } | null;
 };
 
-const Q_LIST_BUNDLE_VARIANTS = /* GraphQL */ `
-  query List($cursor: String) {
-    products(first: 30, after: $cursor, query: "tag:Bundle status:active") {
+const Q_LIST_VARIANTS = /* GraphQL */ `
+  query List($cursor: String, $q: String!) {
+    products(first: 30, after: $cursor, query: $q) {
       edges {
         cursor
         node {
@@ -27,10 +39,13 @@ const Q_LIST_BUNDLE_VARIANTS = /* GraphQL */ `
               node {
                 id
                 title
-                metafields(identifiers: [
-                  { namespace: "sinflora", key: "seat_unit" },
-                  { namespace: "sinflora", key: "seats_per_ticket" }
-                ]) { key value }
+                seatsMeta: metafield(namespace: "sinflora", key: "seats_per_ticket") { value }
+                productVariantComponents(first: 50) {
+                  nodes {
+                    productVariant { id title }
+                    quantity
+                  }
+                }
               }
             }
           }
@@ -50,20 +65,28 @@ const M_REL_BULK = /* GraphQL */ `
 `;
 
 export const dynamic = "force-dynamic";
-// export const runtime = "nodejs"; // sbloccalo se mai vedessi limiti Edge
 
-async function listAllBundleVariants(limit: number | null) {
-  const variants: { id: string; seat: string; qty: number; title?: string | null }[] = [];
+function expectedQtyForVariant(title?: string | null, seatsMeta?: { value?: string | null } | null) {
+  const mf = seatsMeta?.value;
+  if (mf && Number.isFinite(Number(mf))) return Math.max(1, parseInt(mf, 10));
+  if (title && /handicap/i.test(title)) return 2;
+  return 1;
+}
+
+async function listFixInputs(q: string, limit: number | null) {
+  const fixes: {
+    parentId: string; // bundle variant id
+    seatId: string;   // seat unit variant id
+    qty: number;      // desired qty
+    reason: string;
+    variantTitle?: string | null;
+  }[] = [];
+
   let cursor: string | null = null;
 
   for (;;) {
-    let data: ListResp;
-    try {
-      const raw = await adminFetchGQL(Q_LIST_BUNDLE_VARIANTS, { cursor });
-      data = (raw as unknown) as ListResp;
-    } catch (err: any) {
-      throw new Error(`GraphQL fetch failed: ${String(err?.message || err)}`);
-    }
+    const raw = await adminFetchGQL(Q_LIST_VARIANTS, { cursor, q });
+    const data = (raw as unknown) as ListResp;
 
     const edges = data?.products?.edges ?? [];
     for (const e of edges) {
@@ -72,14 +95,62 @@ async function listAllBundleVariants(limit: number | null) {
         const v = ve?.node;
         if (!v || !v.id) continue;
 
-        const mfs = v.metafields ?? [];
-        const seat = (mfs.find((m) => m?.key === "seat_unit")?.value ?? "") as string;
-        const qtyStr = (mfs.find((m) => m?.key === "seats_per_ticket")?.value ?? "1") as string;
-        const qty = Number.parseInt(qtyStr, 10) || 1;
+        const comps = v.productVariantComponents?.nodes ?? [];
+        const childIds = comps
+          .map((c) => c?.productVariant?.id)
+          .filter((x): x is string => Boolean(x));
 
-        if (seat) variants.push({ id: v.id, seat, qty, title: v.title ?? null });
+        if (!childIds.length) {
+          // Nessun componente: non tocchiamo (non è un bundle valido per noi)
+          continue;
+        }
 
-        if (limit && variants.length >= limit) return variants;
+        // Gruppo per childId
+        const byChild = new Map<string, { count: number; totalQty: number }>();
+        for (const c of comps) {
+          const id = c?.productVariant?.id!;
+          const qty = Number(c?.quantity ?? 0) || 0;
+          const prev = byChild.get(id) || { count: 0, totalQty: 0 };
+          prev.count += 1;
+          prev.totalQty += qty;
+          byChild.set(id, prev);
+        }
+
+        const desired = expectedQtyForVariant(v.title, v.seatsMeta);
+
+        if (byChild.size !== 1) {
+          // Ambiguità: più di una Seat Unit collegata; segnalo per fix “hard”
+          for (const [childId, agg] of byChild.entries()) {
+            if (agg.count > 1 || agg.totalQty !== desired) {
+              fixes.push({
+                parentId: v.id,
+                seatId: childId,
+                qty: desired,
+                reason: `ambiguous(${byChild.size}) or qty!=${desired}`,
+                variantTitle: v.title ?? null,
+              });
+            }
+          }
+          if (limit && fixes.length >= limit) return fixes;
+          continue;
+        }
+
+        const [onlyChildId, agg] = Array.from(byChild.entries())[0];
+
+        // Condizioni che richiedono fix:
+        // - duplicati (count > 1)
+        // - qty errata rispetto alla regola attesa
+        if (agg.count > 1 || agg.totalQty !== desired) {
+          fixes.push({
+            parentId: v.id,
+            seatId: onlyChildId,
+            qty: desired,
+            reason: agg.count > 1 ? "duplicates" : `qty!=${desired}`,
+            variantTitle: v.title ?? null,
+          });
+        }
+
+        if (limit && fixes.length >= limit) return fixes;
       }
     }
 
@@ -87,7 +158,8 @@ async function listAllBundleVariants(limit: number | null) {
     cursor = hasNext ? (edges[edges.length - 1]?.cursor ?? null) : null;
     if (!cursor) break;
   }
-  return variants;
+
+  return fixes;
 }
 
 export async function GET(req: Request) {
@@ -109,27 +181,31 @@ export async function GET(req: Request) {
     const limit = limitParam ? Math.max(1, Number.parseInt(limitParam, 10) || 0) : null;
     const debug = /^(1|true)$/i.test(url.searchParams.get("debug") || "");
 
-    const variants = await listAllBundleVariants(limit);
+    // ✅ Query specifica per Wondy se non ne passi una tu
+    const q = url.searchParams.get("query") || "tag:wondy status:active";
+
+    const fixes = await listFixInputs(q, limit);
 
     if (dryRun) {
       return NextResponse.json({
         ok: true,
         dryRun: true,
-        variantsFound: variants.length,
-        sample: debug ? variants.slice(0, 3) : undefined,
+        variantsFound: fixes.length,
+        sample: debug ? fixes.slice(0, 3) : undefined,
+        query: q,
       });
     }
 
-    if (!variants.length) {
-      return NextResponse.json({ ok: true, updated: 0, note: "No bundle variants found" });
+    if (!fixes.length) {
+      return NextResponse.json({ ok: true, updated: 0, note: "No fixes required", query: q });
     }
 
     let updated = 0;
-    for (let i = 0; i < variants.length; i += 20) {
-      const slice = variants.slice(i, i + 20).map((v) => ({
-        parentProductVariantId: v.id,
-        productVariantRelationshipsToRemove: [v.seat],
-        productVariantRelationshipsToCreate: [{ id: v.seat, quantity: v.qty }],
+    for (let i = 0; i < fixes.length; i += 20) {
+      const slice = fixes.slice(i, i + 20).map((f) => ({
+        parentProductVariantId: f.parentId,
+        productVariantRelationshipsToRemove: [f.seatId],
+        productVariantRelationshipsToCreate: [{ id: f.seatId, quantity: f.qty }],
       }));
 
       const res = await adminFetchGQL<{
@@ -144,7 +220,7 @@ export async function GET(req: Request) {
       updated += slice.length;
     }
 
-    return NextResponse.json({ ok: true, updated });
+    return NextResponse.json({ ok: true, updated, query: q });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
   }
