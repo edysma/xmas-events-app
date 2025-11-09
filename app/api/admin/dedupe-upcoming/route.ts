@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { adminFetchGQL } from "@/lib/shopify-admin";
 
+/** Tipi minimi per la risposta GraphQL */
 type CompNode = {
   productVariant?: { id?: string | null; title?: string | null } | null;
   quantity?: number | null;
@@ -10,8 +11,7 @@ type CompNode = {
 type VariantNode = {
   id: string;
   title?: string | null;
-  // metafield singolare (NO identifiers)
-  seatsMeta?: { value?: string | null } | null;
+  seatsMeta?: { value?: string | null } | null; // metafield singolo
   productVariantComponents?: { nodes?: CompNode[] | null } | null;
 } | null;
 
@@ -27,6 +27,7 @@ type ListResp = {
   } | null;
 };
 
+/** Query: lista prodotti/varianti filtrabili per query Shopify */
 const Q_LIST_VARIANTS = /* GraphQL */ `
   query List($cursor: String, $q: String!) {
     products(first: 30, after: $cursor, query: $q) {
@@ -56,6 +57,7 @@ const Q_LIST_VARIANTS = /* GraphQL */ `
   }
 `;
 
+/** Mutation: bulk update relationship (remove+create) */
 const M_REL_BULK = /* GraphQL */ `
   mutation PVRRelBulkUpdate($input: [ProductVariantRelationshipUpdateInput!]!) {
     productVariantRelationshipBulkUpdate(input: $input) {
@@ -66,6 +68,7 @@ const M_REL_BULK = /* GraphQL */ `
 
 export const dynamic = "force-dynamic";
 
+/** Regola quantità attesa: metafield > fallback Handicap:2 > default 1 */
 function expectedQtyForVariant(title?: string | null, seatsMeta?: { value?: string | null } | null) {
   const mf = seatsMeta?.value;
   if (mf && Number.isFinite(Number(mf))) return Math.max(1, parseInt(mf, 10));
@@ -73,12 +76,13 @@ function expectedQtyForVariant(title?: string | null, seatsMeta?: { value?: stri
   return 1;
 }
 
+/** Scansiona e produce la lista di fix necessari */
 async function listFixInputs(q: string, limit: number | null) {
   const fixes: {
-    parentId: string; // bundle variant id
-    seatId: string;   // seat unit variant id
-    qty: number;      // desired qty
-    reason: string;
+    parentId: string;        // variante bundle
+    seatId: string;          // variante Seat Unit
+    qty: number;             // quantità desiderata
+    reason: string;          // "duplicates" | "qty!=X" | "ambiguous(...) or qty!=X"
     variantTitle?: string | null;
   }[] = [];
 
@@ -96,19 +100,11 @@ async function listFixInputs(q: string, limit: number | null) {
         if (!v || !v.id) continue;
 
         const comps = v.productVariantComponents?.nodes ?? [];
-        const childIds = comps
-          .map((c) => c?.productVariant?.id)
-          .filter((x): x is string => Boolean(x));
-
-        if (!childIds.length) {
-          // Nessun componente: non tocchiamo (non è un bundle valido per noi)
-          continue;
-        }
-
-        // Gruppo per childId
         const byChild = new Map<string, { count: number; totalQty: number }>();
+
         for (const c of comps) {
-          const id = c?.productVariant?.id!;
+          const id = c?.productVariant?.id;
+          if (!id) continue;
           const qty = Number(c?.quantity ?? 0) || 0;
           const prev = byChild.get(id) || { count: 0, totalQty: 0 };
           prev.count += 1;
@@ -116,10 +112,13 @@ async function listFixInputs(q: string, limit: number | null) {
           byChild.set(id, prev);
         }
 
+        // Nessun componente → non è un bundle valido per noi
+        if (byChild.size === 0) continue;
+
         const desired = expectedQtyForVariant(v.title, v.seatsMeta);
 
+        // Più Seat Unit diverse collegate: segnalo tutte le entry anomale
         if (byChild.size !== 1) {
-          // Ambiguità: più di una Seat Unit collegata; segnalo per fix “hard”
           for (const [childId, agg] of byChild.entries()) {
             if (agg.count > 1 || agg.totalQty !== desired) {
               fixes.push({
@@ -135,11 +134,8 @@ async function listFixInputs(q: string, limit: number | null) {
           continue;
         }
 
+        // Caso normale: una sola Seat Unit attesa → controlla duplicati/qty
         const [onlyChildId, agg] = Array.from(byChild.entries())[0];
-
-        // Condizioni che richiedono fix:
-        // - duplicati (count > 1)
-        // - qty errata rispetto alla regola attesa
         if (agg.count > 1 || agg.totalQty !== desired) {
           fixes.push({
             parentId: v.id,
@@ -162,6 +158,7 @@ async function listFixInputs(q: string, limit: number | null) {
   return fixes;
 }
 
+/** Route handler */
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -180,8 +177,9 @@ export async function GET(req: Request) {
     const limitParam = url.searchParams.get("limit");
     const limit = limitParam ? Math.max(1, Number.parseInt(limitParam, 10) || 0) : null;
     const debug = /^(1|true)$/i.test(url.searchParams.get("debug") || "");
+    const dump = /^(1|true)$/i.test(url.searchParams.get("dump") || "");
 
-    // ✅ Query specifica per Wondy se non ne passi una tu
+    // Default: solo i prodotti Wondy attivi
     const q = url.searchParams.get("query") || "tag:wondy status:active";
 
     const fixes = await listFixInputs(q, limit);
@@ -192,6 +190,7 @@ export async function GET(req: Request) {
         dryRun: true,
         variantsFound: fixes.length,
         sample: debug ? fixes.slice(0, 3) : undefined,
+        items: dump ? fixes : undefined,   // 👈 elenco completo se dump=1
         query: q,
       });
     }
@@ -200,6 +199,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, updated: 0, note: "No fixes required", query: q });
     }
 
+    // Esecuzione reale (richiede bundles feature + write_products)
     let updated = 0;
     for (let i = 0; i < fixes.length; i += 20) {
       const slice = fixes.slice(i, i + 20).map((f) => ({
